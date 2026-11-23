@@ -3,40 +3,50 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PokéRogue RL · Endless play</title>
-<link rel="stylesheet" href="style.css">
+<title>PokéRogue RL · Endless</title>
+<link rel="stylesheet" href="game.css">
 </head>
 <body>
 <header>
-  <div class="brand">PokéRogue RL <span>Endless · human play</span></div>
-  <div id="status" class="status"></div>
+  <div class="brand">PokéRogue RL <span>Endless · recording</span></div>
+  <div id="runinfo" class="runinfo"></div>
   <div class="hdr-btns">
-    <button id="btnNew" title="New run (N)">New run <kbd>N</kbd></button>
-    <button id="btnRuns" title="Runs (R)">Runs <kbd>R</kbd></button>
+    <label class="toggle" title="Auto-advance battle text (A)"><input type="checkbox" id="optAuto"> Auto text <kbd>A</kbd></label>
+    <select id="optSpeed" title="Text speed">
+      <option value="900">Normal</option>
+      <option value="450" selected>Fast</option>
+      <option value="150">Fastest</option>
+    </select>
+    <button id="btnNew">New run <kbd>N</kbd></button>
+    <button id="btnRuns">Runs <kbd>R</kbd></button>
+    <a class="small-link" href="text.html" title="Plain text debug view">text view</a>
   </div>
 </header>
 
-<main id="main">
-  <section class="col field">
-    <h2>Enemy</h2>
-    <div id="enemies"></div>
-    <h2>Battle log</h2>
-    <div id="messages" class="messages"></div>
-  </section>
-
-  <section class="col decide">
-    <div id="decision" class="decision">
-      <div class="empty">Start a run with <b>New run</b> (or press <kbd>N</kbd>).</div>
+<div id="stage">
+  <div id="screen">
+    <div id="field">
+      <img id="arenaBg" class="px" alt="">
+      <img id="arenaB" class="px" alt="">
+      <img id="arenaA" class="px" alt="">
+      <div id="sprites"></div>
+      <div id="infos"></div>
+      <div id="hud" class="txt"></div>
     </div>
-  </section>
+    <div id="ui"></div>
+    <div id="title" class="overlay center">
+      <div class="title-box txt">
+        <div class="big">PokéRogue · Endless</div>
+        <div>Press <b>N</b> for a new run, <b>R</b> to resume one.</div>
+      </div>
+    </div>
+  </div>
+</div>
 
-  <section class="col party">
-    <h2>Your party <span id="items" class="muted"></span></h2>
-    <div id="party"></div>
-  </section>
-</main>
-
-<footer id="footer"></footer>
+<footer>
+  <span><kbd>←↑↓→</kbd> move</span><span><kbd>Z</kbd>/<kbd>Enter</kbd> confirm</span><span><kbd>X</kbd>/<kbd>Esc</kbd> back</span>
+  <span><kbd>1</kbd>–<kbd>9</kbd> pick</span><span><kbd>Tab</kbd> all legal actions</span><span id="status"></span>
+</footer>
 
 <dialog id="dlgNew">
   <form method="dialog" id="formNew">
@@ -52,7 +62,7 @@
     </div>
     <div id="chooseBox" class="box hidden">
       <div class="picked"><span id="picked"></span><span id="points" class="pts"></span></div>
-      <input id="search" placeholder="Search starters… (affordable only shown)" autocomplete="off">
+      <input id="search" placeholder="Search starters… (only affordable ones shown)" autocomplete="off">
       <div id="starterList" class="starter-list"></div>
     </div>
     <div class="dlg-btns">
@@ -74,7 +84,6 @@
   <div class="dlg-btns"><button id="btnReviewClose">Close</button></div>
 </dialog>
 
-<div id="busy" class="busy hidden">thinking…</div>
-<script src="app.js"></script>
+<script src="game.js"></script>
 </body>
 </html>

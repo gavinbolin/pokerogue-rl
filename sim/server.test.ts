@@ -22,6 +22,8 @@
  *   detach                                 -> stop the current run without an end record (resumable)
  *   abandon                                -> end the current run with cause "abandoned"
  *   shutdown                               -> stop the server
+ *   reset/resume also take visual: true|false (default true for policy human) to attach a `visual` block
+ *   (sprite paths, icons, EXP bars, effectiveness hints) for the play UI. It is never logged.
  * Responses: {ok: true, ...} or {ok: false, error}. A decision response carries
  *   {runId, seed, team, decision: {step, kind, sub, phase, wave, turn, prompt, context, actions, obs},
  *    messages: [battle text since the previous response]} and an ended run carries {end: EndInfo}.
@@ -38,6 +40,7 @@ import { afterAll, beforeAll, it } from "vitest";
 import { type Decision, type EndInfo, EndlessEnv, isDecision } from "./env.ts";
 import { decisionRecord, RunLog } from "./log.ts";
 import { drawTeam } from "./team.ts";
+import { visualize } from "./visual.ts";
 
 const intervals = new Set<ReturnType<typeof setInterval>>();
 const realSetInterval = globalThis.setInterval.bind(globalThis);
@@ -65,6 +68,7 @@ afterAll(() => {
 const ROOT = process.env.SIM_ROOT || path.resolve("..", "..");
 const RUNS = path.join(ROOT, "runs");
 const UI_DIR = path.join(ROOT, "ui");
+const ASSETS_DIR = path.join(ROOT, "vendor", "pokerogue-assets");
 const POINT_CAP = 15;
 const stamp = () => new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 const SESSION = `s${stamp()}-${process.pid}`;
@@ -152,6 +156,8 @@ interface RunOptions {
   withObs: boolean;
   battleStyle: "set" | "switch";
   turnLimit: number;
+  /** attach presentation data (sprites, icons, effectiveness) to responses; default on for human play */
+  visual: boolean;
 }
 
 class Run {
@@ -187,12 +193,14 @@ class Run {
   }
 
   view(extra: Record<string, unknown> = {}) {
+    const withVisual = this.o.visual;
     const base = { runId: this.runId, logFile: this.log ? path.relative(ROOT, this.log.file).replace(/\\/g, "/") : null, seed: this.o.seed, policy: this.o.policy, team: this.teamInfo, messages: this.env.drainMessages(), ...extra };
     const c = this.current;
     if (!c) {
       return { ...base, decision: null };
     }
-    return isDecision(c) ? { ...base, decision: c } : { ...base, end: c };
+    const visual = withVisual ? visualize(this.env.sceneRef, isDecision(c) ? c : null) : undefined;
+    return isDecision(c) ? { ...base, decision: c, visual } : { ...base, end: c, visual };
   }
 
   finish(end: EndInfo): void {
@@ -292,6 +300,7 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
         withObs: req.obs !== false,
         battleStyle: req.style === "switch" ? "switch" : "set",
         turnLimit: Number(req.turnLimit ?? 300),
+        visual: req.visual ?? policy === "human",
       };
       const dir = doLog ? runDir(policy, req.out) : null;
       const runId = doLog ? `${policy}-${stamp()}-seed${seed}` : null;
@@ -411,6 +420,7 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
         withObs: start.withObs !== false,
         battleStyle: start.battleStyle === "switch" ? "switch" : "set",
         turnLimit: start.turnLimit ?? 300,
+        visual: req.visual ?? true,
       };
       const r = new Run(opts, start.runId, path.dirname(file));
       run = r;
@@ -498,7 +508,7 @@ function dispatch(req: Record<string, any>): Promise<Record<string, unknown>> {
 
 let stop: (() => void) | null = null;
 
-const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
+const MIME: Record<string, string> = { ".png": "image/png", ".json": "application/json", ".ttf": "font/ttf", ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
 
 function httpServer(): http.Server {
   return http.createServer((req, res) => {
@@ -522,6 +532,17 @@ function httpServer(): http.Server {
         const out = await dispatch(msg);
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(out));
       });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/assets/")) {
+      // Game art from the pinned pokerogue-assets checkout (vendor/pokerogue-assets), read-only.
+      const rel = decodeURIComponent(url.pathname.slice("/assets/".length));
+      const file = path.resolve(ASSETS_DIR, rel);
+      if (/^(images|fonts)\//.test(rel) && file.startsWith(ASSETS_DIR + path.sep) && /\.(png|json|ttf)$/.test(file) && fs.existsSync(file)) {
+        res.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "public, max-age=86400" }).end(fs.readFileSync(file));
+      } else {
+        res.writeHead(404).end("not found");
+      }
       return;
     }
     if (req.method === "GET") {

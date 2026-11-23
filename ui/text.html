@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokéRogue RL · Endless play</title>
+<link rel="stylesheet" href="text.css">
+</head>
+<body>
+<header>
+  <div class="brand">PokéRogue RL <span>Endless · human play</span></div>
+  <div id="status" class="status"></div>
+  <div class="hdr-btns">
+    <button id="btnNew" title="New run (N)">New run <kbd>N</kbd></button>
+    <button id="btnRuns" title="Runs (R)">Runs <kbd>R</kbd></button>
+  </div>
+</header>
+
+<main id="main">
+  <section class="col field">
+    <h2>Enemy</h2>
+    <div id="enemies"></div>
+    <h2>Battle log</h2>
+    <div id="messages" class="messages"></div>
+  </section>
+
+  <section class="col decide">
+    <div id="decision" class="decision">
+      <div class="empty">Start a run with <b>New run</b> (or press <kbd>N</kbd>).</div>
+    </div>
+  </section>
+
+  <section class="col party">
+    <h2>Your party <span id="items" class="muted"></span></h2>
+    <div id="party"></div>
+  </section>
+</main>
+
+<footer id="footer"></footer>
+
+<dialog id="dlgNew">
+  <form method="dialog" id="formNew">
+    <h3>New Endless run</h3>
+    <label>Seed <input id="seed" placeholder="blank = random" autocomplete="off"></label>
+    <div class="seg">
+      <label><input type="radio" name="teamMode" value="random" checked> Random team for seed</label>
+      <label><input type="radio" name="teamMode" value="choose"> Choose team</label>
+    </div>
+    <div id="randomBox" class="box">
+      <button type="button" id="btnPreview">Preview team</button>
+      <div id="preview" class="muted"></div>
+    </div>
+    <div id="chooseBox" class="box hidden">
+      <div class="picked"><span id="picked"></span><span id="points" class="pts"></span></div>
+      <input id="search" placeholder="Search starters… (affordable only shown)" autocomplete="off">
+      <div id="starterList" class="starter-list"></div>
+    </div>
+    <div class="dlg-btns">
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button id="btnStart" value="start" class="primary">Start run</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgRuns">
+  <h3>Runs <span class="muted">(runs/human)</span></h3>
+  <div id="runList"></div>
+  <div class="dlg-btns"><button id="btnRunsClose">Close</button></div>
+</dialog>
+
+<dialog id="dlgReview">
+  <h3 id="reviewTitle">Review</h3>
+  <div id="reviewBody" class="review"></div>
+  <div class="dlg-btns"><button id="btnReviewClose">Close</button></div>
+</dialog>
+
+<div id="busy" class="busy hidden">thinking…</div>
+<script src="text.js"></script>
+</body>
+</html>

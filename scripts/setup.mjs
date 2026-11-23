@@ -1,6 +1,7 @@
 /**
  * Fetch the pinned PokeRogue checkout into vendor/pokerogue and install its dependencies.
  *   node scripts/setup.mjs
+ * Also fetches the play UI's art (sparse pokerogue-assets checkout; skip with --no-assets).
  * Idempotent. Talks to github.com and the npm registry only (never pokerogue.net).
  */
 import { spawnSync } from "node:child_process";
@@ -50,6 +51,45 @@ if (!fs.existsSync(path.join(vendor, "package.json"))) {
 }
 if (!fs.existsSync(path.join(vendor, "locales", "en"))) {
   sh("git", ["submodule", "update", "--init", "--depth", "1", "locales"], vendor);
+}
+
+// Game art for the play UI (sparse: battle/back sprites, party icons, arenas, items, UI windows, fonts).
+const assets = path.join(root, "vendor", "pokerogue-assets");
+const ASSET_PATTERNS = [
+  "/images/pokemon/*.png",
+  "/images/pokemon/*.json",
+  "/images/pokemon/back/*.png",
+  "/images/pokemon/back/*.json",
+  "/images/pokemon_icons_[0-9].png",
+  "/images/pokemon_icons_[0-9].json",
+  "/images/arenas/",
+  "/images/items/",
+  "/images/types.png",
+  "/images/types.json",
+  "/images/statuses.png",
+  "/images/statuses.json",
+  "/images/categories.png",
+  "/images/categories.json",
+  "/images/ui/*.png",
+  "/images/ui/*.json",
+  "/images/ui/windows/",
+  "/fonts/",
+  "/LICENSES/",
+  "/README.md",
+  "/REUSE.toml",
+  "/images/REUSE.toml",
+];
+if (pin.assets && process.argv.includes("--no-assets")) {
+  console.log("skipping play-UI assets (--no-assets)");
+} else if (pin.assets && !fs.existsSync(path.join(assets, "images", "arenas"))) {
+  fs.rmSync(assets, { recursive: true, force: true });
+  sh("git", ["clone", "--filter=blob:none", "--no-checkout", "--depth", "1", pin.assets_repo, assets]);
+  sh("git", ["fetch", "--depth", "1", "--filter=blob:none", "origin", pin.assets], assets);
+  sh("git", ["sparse-checkout", "init", "--no-cone"], assets);
+  fs.writeFileSync(path.join(assets, ".git", "info", "sparse-checkout"), `${ASSET_PATTERNS.join("\n")}\n`);
+  sh("git", ["-c", "advice.detachedHead=false", "checkout", pin.assets], assets);
+} else if (pin.assets) {
+  console.log(`vendor/pokerogue-assets present (${out("git", ["rev-parse", "--short", "HEAD"], assets)})`);
 }
 
 // pnpm via corepack's JS entry (avoids the Windows .cmd spawn restriction).
