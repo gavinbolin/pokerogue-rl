@@ -13,7 +13,7 @@ import path from "node:path";
 import Phaser from "phaser";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { EndlessEnv, isDecision } from "./env.ts";
-import { RunLog } from "./log.ts";
+import { decisionRecord, RunLog } from "./log.ts";
 import { makePolicy } from "./policies.ts";
 
 const intervals = new Set<ReturnType<typeof setInterval>>();
@@ -91,25 +91,7 @@ it("plays endless", async () => {
       while (isDecision(d)) {
         const i = await policy(d);
         const a = d.actions[i];
-        const rec: Record<string, unknown> = {
-          t: "d",
-          step: d.step,
-          wave: d.wave,
-          turn: d.turn,
-          kind: d.kind,
-          sub: d.sub,
-          phase: d.phase,
-          n: d.actions.length,
-          chosen: i,
-          action: a.id,
-          label: a.label,
-        };
-        if (withObs) {
-          rec.actions = d.actions;
-          rec.context = d.context;
-          rec.prompt = d.prompt;
-          rec.obs = d.obs;
-        }
+        const rec = decisionRecord(d, i, withObs);
         log.write(rec);
         const next = await env.step(i);
         if (env.lastDecisionRejected) {

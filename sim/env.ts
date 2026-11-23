@@ -140,6 +140,8 @@ export class EndlessEnv {
   private scene!: BattleScene;
   private started = new WeakSet<object>();
   private animSkips = 0;
+  /** Battle messages shown since the last drainMessages() (not part of the decision log). */
+  readonly messages: string[] = [];
   private rejected = new WeakMap<object, Set<string>>();
   private pending: Pending | null = null;
   private pendingSkip = false;
@@ -168,6 +170,11 @@ export class EndlessEnv {
 
   // ---------------------------------------------------------------- boot
 
+  /** Messages the game displayed since the previous call. */
+  drainMessages(): string[] {
+    return this.messages.splice(0, this.messages.length);
+  }
+
   async reset(): Promise<Decision | EndInfo> {
     const t0 = Date.now();
     const seed = this.opts.seed;
@@ -189,7 +196,7 @@ export class EndlessEnv {
     this.game.settings.battleStyle(this.opts.battleStyle === "switch" ? BattleStyle.SWITCH : BattleStyle.SET);
     const scene = (this.scene = this.game.scene);
     vi.spyOn(scene.ui, "shouldSkipDialogue").mockReturnValue(true);
-    patchUi(scene);
+    patchUi(scene, this.messages);
     this.trackModeChanges(scene);
     blockNetwork();
 
@@ -643,7 +650,7 @@ export class EndlessEnv {
       if (!hasTarget(o.type)) {
         return;
       }
-      this.add(p, { id: `reward:${i}`, label: o.type.name, data: { typeId: o.type.id, tier: o.type.tier } }, press(1, i));
+      this.add(p, { id: `reward:${i}`, label: o.type.name, data: { typeId: o.type.id, tier: o.type.tier, desc: describe(o.type) } }, press(1, i));
     });
     if (scene.gameMode.getShopStatus()) {
       const shop = getPlayerShopModifierTypeOptionsForWave(scene.currentBattle.waveIndex, scene.getWaveMoneyAmount(1));
@@ -655,7 +662,7 @@ export class EndlessEnv {
         }
         // Shop rows sit below the rewards: one row -> rowCursor 2; two rows -> 3 is the first, 2 the second.
         const [row, col] = shop.length <= SHOP_OPTIONS_ROW_LIMIT ? [2, k] : k < SHOP_OPTIONS_ROW_LIMIT ? [3, k] : [2, k - SHOP_OPTIONS_ROW_LIMIT];
-        this.add(p, { id: `shop:${k}`, label: `Buy ${o.type.name}`, data: { typeId: o.type.id, cost: cost.value } }, press(row, col));
+        this.add(p, { id: `shop:${k}`, label: `Buy ${o.type.name}`, data: { typeId: o.type.id, cost: cost.value, desc: describe(o.type) } }, press(row, col));
       });
     }
     const reroll = phase.getRerollCost(scene.lockModifierTiers);
@@ -911,6 +918,23 @@ function pickOption(h: AnyHandler, i: number): boolean {
   return false;
 }
 
+function describe(type: any): string | undefined {
+  try {
+    return cleanText(type?.getDescription?.()) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanText(text: unknown): string {
+  return String(text ?? "")
+    .replace(/@\w\{[^}]*\}/g, "")
+    .replace(/\[[A-Z_]+\]|\{[A-Z_]+\}/g, "")
+    .replace(/\$/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function lastText(scene: BattleScene): string | undefined {
   try {
     const h = scene.ui.getMessageHandler() as AnyHandler;
@@ -947,8 +971,24 @@ function stubHeadlessAssets(): void {
   };
 }
 
-function patchUi(scene: BattleScene): void {
+function patchUi(scene: BattleScene, sink: string[]): void {
   const ui = scene.ui as any;
+  // Keep a copy of every battle message so a human (or a log reader) can see what just happened.
+  for (const fn of ["showText", "showDialogue"]) {
+    const orig = ui[fn]?.bind(ui);
+    if (orig) {
+      ui[fn] = (text: unknown, ...rest: unknown[]) => {
+        const clean = cleanText(text);
+        if (clean && sink[sink.length - 1] !== clean) {
+          sink.push(clean);
+          if (sink.length > 200) {
+            sink.splice(0, sink.length - 200);
+          }
+        }
+        return orig(text, ...rest);
+      };
+    }
+  }
   ui.fadeOut = async () => {
     ui.overlayActive = false;
   };

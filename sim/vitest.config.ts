@@ -1,5 +1,5 @@
 /**
- * Vitest config that runs sim/endless.test.ts against the pinned game in vendor/pokerogue,
+ * Vitest config that runs sim/endless.test.ts (or sim/server.test.ts with SIM_ENTRY=server) against the pinned game in vendor/pokerogue,
  * reusing the game's own test environment (jsdom, headless Phaser, i18n mocks).
  */
 import fs from "node:fs";
@@ -12,7 +12,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const gameRoot = path.resolve(here, "../vendor/pokerogue");
 const slash = (p: string) => p.replace(/\\/g, "/");
 // Vitest treats backslashes in `include` as escapes.
-const testFile = slash(path.join(here, "endless.test.ts"));
+// SIM_ENTRY=server runs the long-lived JSON-lines / HTTP server instead of a batch of seeds.
+const entry = process.env.SIM_ENTRY === "server" ? "server.test.ts" : "endless.test.ts";
+const testFile = slash(path.join(here, entry));
 
 /**
  * The game resolves `#foo/...` imports through its tsconfig `paths`. Files in sim/ sit outside the
@@ -73,7 +75,8 @@ export default defineConfig(async env => {
         "./test/setup/vitest.setup.ts",
         "./test/setup/matchers.setup.ts",
       ],
-      testTimeout: 24 * 60 * 60 * 1000,
+      // The server lives until told to shut down (setTimeout's max, ~24.8 days).
+      testTimeout: entry === "server.test.ts" ? 2 ** 31 - 1 : 24 * 60 * 60 * 1000,
       hookTimeout: 300 * 1000,
       fileParallelism: false,
       maxWorkers: 1,

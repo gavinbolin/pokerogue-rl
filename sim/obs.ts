@@ -9,6 +9,8 @@ import { BiomeId } from "#enums/biome-id";
 import { BattleType } from "#enums/battle-type";
 import { PokemonType } from "#enums/pokemon-type";
 import { StatusEffect } from "#enums/status-effect";
+import { WeatherType } from "#enums/weather-type";
+import { TerrainType } from "#data/terrain";
 import type { Pokemon } from "#field/pokemon";
 
 export interface MoveObs {
@@ -63,6 +65,8 @@ export interface Observation {
   money: number;
   weather: number | null;
   terrain: number | null;
+  weatherName: string | null;
+  terrainName: string | null;
   party: MonObs[];
   enemies: EnemyObs[];
   balls: Record<string, number>;
@@ -162,6 +166,8 @@ export function observe(scene: BattleScene): Observation {
     money: scene.money,
     weather: scene.arena?.weather?.weatherType ?? null,
     terrain: scene.arena?.terrain?.terrainType ?? null,
+    weatherName: scene.arena?.weather?.weatherType ? enumName(WeatherType, scene.arena.weather.weatherType) : null,
+    terrainName: scene.arena?.terrain?.terrainType ? enumName(TerrainType, scene.arena.terrain.terrainType) : null,
     party,
     enemies,
     balls,
