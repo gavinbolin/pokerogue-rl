@@ -21,7 +21,9 @@ No heuristics live here. The only policy so far is uniform-random over the legal
 | `scripts/serve.mjs` | Starts the long-lived sim server (`npm run play`): HTTP play UI + JSON-lines TCP API. |
 | `scripts/api-check.mjs` | End-to-end check of a running server over the TCP API (logs to `runs/apicheck/`). |
 | `sim/server.test.ts` | The server: one game process reused across runs; `reset` / `step` / `resume` / ... |
-| `ui/` | The human play UI (plain HTML/CSS/JS, no build step), served by the server. |
+| `ui/` | The human play UI (plain HTML/CSS/JS, no build step), served by the server: `index.html` + `game.js` + `game.css` is the PokéRogue-style screen; `text.html` is the old plain-text debug view. |
+| `sim/visual.ts` | Presentation data for the UI (sprite / icon / arena keys, EXP bars, item icons, type-effectiveness hints). Never logged. |
+| `scripts/ui-shots.mjs` | Screenshots of the UI via a throwaway headless Edge/Chrome driven by keystrokes (needs a running server). |
 | `sim/vitest.config.ts` | Extends the game's own vitest config (mocked Phaser HEADLESS + jsdom) with `root = vendor/pokerogue`. |
 | `sim/env.ts` | `EndlessEnv`: boot, `reset()`, `step(index)`, legality, auto-advance of non-decisions. |
 | `sim/obs.ts` | `observe(scene)`: JSON observation (party, enemies, field, money, items). |
@@ -36,7 +38,9 @@ No heuristics live here. The only policy so far is uniform-random over the legal
 Requires Node ≥ 24.9 and git. pnpm comes through the game's bundled corepack.
 
 ```powershell
-node scripts/setup.mjs        # clones pagefaultgames/pokerogue@e1a0c20 + locales, pnpm install
+node scripts/setup.mjs        # clones pagefaultgames/pokerogue@e1a0c20 + locales, pnpm install,
+                              # and a sparse ~85 MB checkout of pokerogue-assets@8250b23 (play-UI art) into
+                              # vendor/pokerogue-assets (skip with --no-assets; the sim itself never loads art)
 ```
 
 ## Run
@@ -124,15 +128,43 @@ It takes about 25 s to boot the game once, then prints:
 
 Open the URL. Both ports are bound to 127.0.0.1 only. Press Ctrl+C to stop.
 
+The play screen is a simplified copy of the real game, drawn with the game's own art (sprites, arenas, item
+icons, UI windows and font from the pinned `pokerogue-assets` commit, served locally by the sim server; the
+page makes no outside requests):
+
+- **Battle scene:** the biome background and platforms, the enemy's animated front sprite at the top right and
+  yours from the back at the bottom left (two of each in doubles). Info boxes show name, level, HP bar, status,
+  types, stat changes, shiny ★, and boss bars. Yours also shows HP numbers and an EXP bar. Wave, biome and
+  money are at the top right.
+- **Battle text** plays one line at a time in the message box. Press Z/Enter or click to advance, or turn on
+  **Auto text** (`A`) with Normal/Fast/Fastest speed. HP bars drain after the attack line, attackers lunge,
+  and fainted mons drop out.
+- **Command menu** like the game: Fight / Ball / Pokémon / Run. **Fight** shows your 4 moves with the type, category,
+  PP, power and accuracy of the highlighted one. Move names are tinted by effectiveness against the visible foe, with
+  an `x2` / `x0.5` hint, as the game's type hints do. Moves you can't use are greyed out. **Ball** lists your balls
+  with counts. **Pokémon** opens the party screen. Doubles get a target picker that makes the chosen sprite blink.
+- **Party screen** (switches, faint switches, item / TM / move targets, release when catching with a full party):
+  party slots with icons, HP bars, held items and fainted styling, plus the highlighted mon's types, ability, moves
+  and stats. Slots that aren't a legal choice are greyed out. If a slot has several choices (e.g. which move gets the
+  Ether), a sub-menu lists them.
+- **Reward screen:** item cards with icons and tier colours, the shop row with prices, Reroll / Skip, and each item's
+  description in the message box.
+- **Learn move, biome choice and other prompts** use the game's option window.
+- **Keys:** arrows move, `Z`/`Enter`/`Space` confirm, `X`/`Esc`/right-click go back, and `1`–`9` pick the nth option in the
+  current menu. `Tab` lists *all* legal actions (a fallback that always reaches every action), `N` starts a new run
+  and `R` opens Runs. The mouse works everywhere.
+- Every selectable thing on screen is exactly one legal action from the server, sent as `step {index, expect}`. The
+  UI never invents actions, so logged runs look the same as before. Sprites, icons and effectiveness hints come in a
+  separate `visual` block that is never written to the log. It is computed with the game RNG saved and restored, and
+  the API check confirms a run played with visuals replays identically without them.
+- `text.html` (link in the header) is the old plain-text view of the same run, handy for debugging.
+
+Runs, resume and review work as before:
+
 - **New run** (`N`): enter a seed (leave it blank for a random one), then either keep the seeded random team
   (**Preview** shows it) or pick up to 6 starters yourself under the 15-point cap.
-- Each decision shows the prompt and one button per legal action. Keys `1`–`9` and `0` pick the first ten,
-  then `q w e r …` for the rest. Move buttons show type, category, power, accuracy and PP. Reward and shop buttons
-  show the tier, cost and the item's description. Switch and party buttons show the target's HP and types.
-- The left column shows the visible enemy info (HP %, status, types, boss bars, stat stages) and the battle text
-  since your last choice. The right column shows your party in full (stats, moves, PP, held items, ability).
 - **Runs** (`R`) lists `runs/human/`. **Resume** replays a paused run's logged choices with the same seed and team
-  (deterministic, about 100 decisions/s) and keeps appending to the same file. **Review** shows every decision with
+  (deterministic, over 100 decisions/s) and keeps appending to the same file. **Review** shows every decision with
   its options.
 - Each human run is logged to `runs/human/<runId>.jsonl` (for example `human-20261123-224744-seed777`), one record
   per decision, written immediately. The format is the same as the bot runs (obs + full legal list +
@@ -141,6 +173,10 @@ Open the URL. Both ports are bound to 127.0.0.1 only. Press Ctrl+C to stop.
   where a new session picked up.
 - Closing the page doesn't end the run: reload and it picks up again. Starting a new run leaves the old one
   paused and resumable.
+
+`node scripts/ui-shots.mjs` (with the server running) renders screenshots of the battle, fight menu, party,
+reward, battle text and, when they come up, catch-with-full-party, item target, doubles and game-over screens
+into `runs/ui-shots/`. It uses a throwaway headless Edge with its own temp profile and debug port 9339 (never 9222).
 
 ## Server API (for scripts and the future Python Gym env)
 
@@ -174,5 +210,13 @@ detach, resume by replay landing on the identical decision, review, and an agent
 - A vitest cold start is about 20–25 s per process. After that, each boot (reset) takes about 0.1 s.
 - Play speed on one process: about 210–235 decisions/s and 24–26 waves/s (random policy, obs on or off).
 - 200 runs with `--parallel 6` finish in 80 s of wall time, about 185 decisions/s in total (14.8k decisions).
-- A random policy wipes on average at wave 9 (median 8, max 19). The 200-seed stress test (seeds 1000–1199) ended in 200/200 wipes,
+- A random policy wipes on average at wave 9 (median 9, max 19). The 200-seed stress test (seeds 1000–1199) ended in 200/200 wipes,
   with 0 stalls, 0 errors and 0 rejected actions.
+
+## Notes
+
+- **Starting money.** Runs start with ₽1000 like the real game. The game sets it in the starter-select screen's
+  `startRun()`, which the harness bypasses by calling `initBattle` directly, so before commit 8669e60 every run
+  started at ₽0 (logs from before then have money 0). Wild battles award no money in PokéRogue (only trainer battles
+  push `MoneyRewardPhase`, and Endless has no trainers), so money only changes through shop spending, rerolls, and
+  money items or moves (Amulet Coin, Pay Day, …). With the fix, random play buys about 10x more shop items.
