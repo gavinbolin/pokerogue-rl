@@ -76,6 +76,7 @@ it("plays endless", async () => {
       turnLimit: Number(process.env.SIM_TURN_LIMIT || 300),
       battleStyle: (process.env.SIM_STYLE === "switch" ? "switch" : "set") as "set" | "switch",
       stallMs: Number(process.env.SIM_STALL_MS || 30000),
+      maxDecisionsPerWave: Number(process.env.SIM_MAX_DECISIONS_PER_WAVE || 1500),
       onWave: (w: Record<string, unknown>) => log.write({ t: "wave", ...w }),
     };
     const env = new EndlessEnv(phaserGame, realRand, opts);

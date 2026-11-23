@@ -109,6 +109,7 @@ export interface EnvOptions {
   turnLimit: number; // per-wave turn cap (stops random play from looping forever)
   battleStyle: "set" | "switch";
   stallMs: number;
+  maxDecisionsPerWave: number; // safety cap against decision loops
   onWave?: (info: { wave: number; prev: number; partyHpFrac: number; alive: number; ms: number }) => void;
 }
 
@@ -151,6 +152,9 @@ export class EndlessEnv {
   private bootSeconds = 0;
   private playStartedAt = 0;
   private finished: EndInfo | null = null;
+  /** UI mode changes still in flight (fade transitions resolve on later clock ticks). */
+  private modeChanges = 0;
+  private waveDecisions = 0;
 
   constructor(
     private readonly phaserGame: Phaser.Game,
@@ -184,6 +188,7 @@ export class EndlessEnv {
     const scene = (this.scene = this.game.scene);
     vi.spyOn(scene.ui, "shouldSkipDialogue").mockReturnValue(true);
     patchUi(scene);
+    this.trackModeChanges(scene);
     blockNetwork();
 
     await this.game.runToTitle();
@@ -208,6 +213,21 @@ export class EndlessEnv {
     this.playStartedAt = Date.now();
     this.waveStartedAt = Date.now();
     return this.advance();
+  }
+
+  /** Count in-flight UI mode changes so decisions are only read once the screen has settled. */
+  private trackModeChanges(scene: BattleScene): void {
+    const ui = scene.ui as any;
+    const inner = ui.setModeInternal;
+    ui.setModeInternal = (...args: unknown[]) => {
+      this.modeChanges++;
+      const done = () => {
+        this.modeChanges--;
+      };
+      const p: Promise<void> = inner.apply(ui, args);
+      p.then(done, done);
+      return p;
+    };
   }
 
   private reseed(seed: string): void {
@@ -282,6 +302,7 @@ export class EndlessEnv {
     let lastKey = "";
     let keySince = Date.now();
     let idle = 0;
+    await tick();
     for (;;) {
       if (this.finished) {
         return this.finished;
@@ -315,6 +336,7 @@ export class EndlessEnv {
             ms: Date.now() - this.waveStartedAt,
           });
           this.waveStartedAt = Date.now();
+          this.waveDecisions = 0;
         }
         if (battle.turn > this.opts.turnLimit) {
           return this.end(`turn_limit:${this.opts.turnLimit}`);
@@ -341,7 +363,7 @@ export class EndlessEnv {
 
       let found: Pending | null = null;
       try {
-        found = this.detect(phase, name, mode);
+        found = this.modeChanges > 0 ? null : this.detect(phase, name, mode);
       } catch (error) {
         return this.end(`error: detect ${key}: ${errText(error)}`);
       }
@@ -355,6 +377,9 @@ export class EndlessEnv {
           idle = 0;
           await tick();
           continue;
+        }
+        if (++this.waveDecisions > this.opts.maxDecisionsPerWave) {
+          return this.end(`decision_limit:${this.opts.maxDecisionsPerWave}`);
         }
         this.step_++;
         found.decision.step = this.step_;
@@ -399,7 +424,9 @@ export class EndlessEnv {
     if (mode === UiMode.SUMMARY && name === "LearnMovePhase" && typeof h.moveSelectFunction === "function" && this.pendingForget != null) {
       const idx = this.pendingForget;
       this.pendingForget = null;
-      h.moveSelectFunction(idx);
+      const fn = h.moveSelectFunction;
+      h.moveSelectFunction = null;
+      fn(idx);
       return true;
     }
     // Full-party catch: the slot to release was already chosen at the catch_full decision.
@@ -616,7 +643,8 @@ export class EndlessEnv {
         if (scene.money < cost.value || !hasTarget(o.type)) {
           return;
         }
-        const [row, col] = k < SHOP_OPTIONS_ROW_LIMIT ? [3, k] : [2, k - SHOP_OPTIONS_ROW_LIMIT];
+        // Shop rows sit below the rewards: one row -> rowCursor 2; two rows -> 3 is the first, 2 the second.
+        const [row, col] = shop.length <= SHOP_OPTIONS_ROW_LIMIT ? [2, k] : k < SHOP_OPTIONS_ROW_LIMIT ? [3, k] : [2, k - SHOP_OPTIONS_ROW_LIMIT];
         this.add(p, { id: `shop:${k}`, label: `Buy ${o.type.name}`, data: { typeId: o.type.id, cost: cost.value } }, press(row, col));
       });
     }
@@ -773,16 +801,10 @@ export class EndlessEnv {
     const p = this.base(phase, "forget_move", { context: { moveId: phase.moveId } });
     mon.getMoveset().forEach((m, i) => {
       if (m) {
-        this.add(p, { id: `forget:${i}`, label: `Forget ${m.getName()}` }, () => {
-          h.moveSelectFunction(i);
-          return true;
-        });
+        this.add(p, { id: `forget:${i}`, label: `Forget ${m.getName()}` }, () => callOnce(h, "moveSelectFunction", i));
       }
     });
-    this.add(p, { id: "keep", label: "Don't learn" }, () => {
-      h.moveSelectFunction(4);
-      return true;
-    });
+    this.add(p, { id: "keep", label: "Don't learn" }, () => callOnce(h, "moveSelectFunction", 4));
     return p;
   }
 
@@ -850,6 +872,17 @@ function releaseSlot(scene: BattleScene, h: AnyHandler, s: number): boolean {
   const cb = h.selectCallback;
   h.selectCallback = null;
   cb?.(cursor, PartyOption.RELEASE);
+  return true;
+}
+
+/** Call a one-shot UI callback field, clearing it first as the UI handler itself does. */
+function callOnce(h: AnyHandler, field: string, ...args: unknown[]): boolean {
+  const fn = h[field];
+  if (typeof fn !== "function") {
+    return false;
+  }
+  h[field] = null;
+  fn(...args);
   return true;
 }
 
