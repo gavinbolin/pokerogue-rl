@@ -93,6 +93,7 @@ export interface EndInfo {
   decisions: number;
   forced: number;
   autoSteps: number;
+  animSkips: number;
   rejected: number;
   bootSeconds: number;
   playSeconds: number;
@@ -138,6 +139,7 @@ export class EndlessEnv {
   private game!: GameManager;
   private scene!: BattleScene;
   private started = new WeakSet<object>();
+  private animSkips = 0;
   private rejected = new WeakMap<object, Set<string>>();
   private pending: Pending | null = null;
   private pendingSkip = false;
@@ -289,6 +291,7 @@ export class EndlessEnv {
       decisions: this.step_,
       forced: this.forced,
       autoSteps: this.autoSteps,
+      animSkips: this.animSkips,
       rejected: this.rejectedCount,
       bootSeconds: this.bootSeconds,
       playSeconds: (Date.now() - this.playStartedAt) / 1000,
@@ -348,6 +351,13 @@ export class EndlessEnv {
         try {
           phase.start();
         } catch (error) {
+          // A purely cosmetic animation phase can throw headless when its target sprite is
+          // already gone (seen: CommonAnimPhase after a faint). Skipping it changes no game state.
+          if (name === "CommonAnimPhase" || name === "MoveAnimPhase") {
+            this.animSkips++;
+            phase.end();
+            continue;
+          }
           return this.end(`error: ${name}.start: ${errText(error)}`);
         }
         idle = 0;
