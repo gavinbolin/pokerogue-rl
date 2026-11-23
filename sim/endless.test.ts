@@ -90,7 +90,6 @@ it("plays endless", async () => {
       while (isDecision(d)) {
         const i = await policy(d);
         const a = d.actions[i];
-        const next = await env.step(i);
         const rec: Record<string, unknown> = {
           t: "d",
           step: d.step,
@@ -103,7 +102,6 @@ it("plays endless", async () => {
           chosen: i,
           action: a.id,
           label: a.label,
-          rejected: env.lastDecisionRejected || undefined,
         };
         if (withObs) {
           rec.actions = d.actions;
@@ -112,6 +110,10 @@ it("plays endless", async () => {
           rec.obs = d.obs;
         }
         log.write(rec);
+        const next = await env.step(i);
+        if (env.lastDecisionRejected) {
+          log.write({ t: "rej", step: d.step, action: a.id });
+        }
         d = next;
       }
       result = d;

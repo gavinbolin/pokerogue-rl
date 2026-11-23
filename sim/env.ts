@@ -17,7 +17,8 @@
  *              memory mushroom move, splice pair, release on full party, revival blessing)
  *   learn_move - mon with 4 moves wants a new one: forget move i, or don't learn
  *   biome    - choose next biome (only when a Map lets you)
- *   option   - any other in-game option / confirm menu (e.g. catch with full party)
+ *   catch_full - caught a mon with 6 in party: release slot s to keep it, or don't keep it
+ *   option   - any other in-game option / confirm menu
  * Purely cosmetic prompts (text boxes, single-option menus) are auto-advanced and counted as
  * "auto" steps. Decisions with exactly one legal action are applied automatically ("forced").
  * No hand-written play heuristics live here: only the game's own legality rules.
@@ -59,11 +60,11 @@ import { getStarterMoves } from "#ui/starter-select-ui-utils";
 import { NumberHolder } from "#utils/common";
 import Phaser from "phaser";
 import { vi } from "vitest";
-import { type Observation, observe } from "./obs.ts";
+import { enumName, type Observation, observe } from "./obs.ts";
 import { seeded } from "./rng.ts";
 import { drawTeam, fixedTeam, type Team } from "./team.ts";
 
-export type DecisionKind = "command" | "target" | "reward" | "party" | "learn_move" | "forget_move" | "biome" | "option";
+export type DecisionKind = "command" | "target" | "reward" | "party" | "learn_move" | "forget_move" | "catch_full" | "biome" | "option";
 
 export interface LegalAction {
   id: string; // stable machine id, e.g. "move:2", "switch:4", "reward:1", "shop:3", "skip"
@@ -125,7 +126,9 @@ const MESSAGE_LIKE = new Set<UiMode>([
   UiMode.EGG_HATCH_SCENE,
   UiMode.EGG_HATCH_SUMMARY,
 ]);
-const CLOSE_IF_STUCK = new Set<UiMode>([UiMode.SUMMARY, UiMode.MENU, UiMode.BALL, UiMode.POKEDEX, UiMode.PARTY]);
+const CLOSE_IF_STUCK = new Set<UiMode>([UiMode.SUMMARY, UiMode.MENU, UiMode.BALL, UiMode.POKEDEX, UiMode.POKEDEX_PAGE, UiMode.PARTY]);
+/** Purely informational menu entries (open a viewer and come back); never offered as actions. */
+const INFO_LABELS = /^(summary|pok[eé]dex|check team)$/i;
 
 const originalStatsContainer = BattleInfo.prototype.getStatsValueContainer;
 
@@ -138,6 +141,7 @@ export class EndlessEnv {
   private pending: Pending | null = null;
   private pendingSkip = false;
   private pendingForget: number | null = null;
+  private pendingRelease: number | null = null;
   private step_ = 0;
   private forced = 0;
   private autoSteps = 0;
@@ -329,7 +333,7 @@ export class EndlessEnv {
       }
 
       const mode = scene.ui.mode;
-      const key = `${name}|${UiMode[mode]}`;
+      const key = `${name}|${enumName(UiMode, mode)}`;
       if (key !== lastKey) {
         lastKey = key;
         keySince = Date.now();
@@ -398,6 +402,12 @@ export class EndlessEnv {
       h.moveSelectFunction(idx);
       return true;
     }
+    // Full-party catch: the slot to release was already chosen at the catch_full decision.
+    if (mode === UiMode.PARTY && this.pendingRelease != null && h.partyUiMode === PartyUiMode.RELEASE && typeof h.selectCallback === "function") {
+      const s = this.pendingRelease;
+      this.pendingRelease = null;
+      return releaseSlot(this.scene, h, s);
+    }
     // Skip-reward confirmation: the skip was already the decision.
     if (mode === UiMode.CONFIRM && this.pendingSkip && name === "SelectModifierPhase" && h.options?.length) {
       this.pendingSkip = false;
@@ -428,6 +438,9 @@ export class EndlessEnv {
       return this.rewardDecision(phase, h);
     }
     if (mode === UiMode.PARTY && typeof h.selectCallback === "function") {
+      if (this.pendingRelease != null && h.partyUiMode === PartyUiMode.RELEASE) {
+        return null; // handled by autoAdvance
+      }
       return this.partyDecision(phase, h);
     }
     if (mode === UiMode.SUMMARY && name === "LearnMovePhase" && typeof h.moveSelectFunction === "function" && this.pendingForget == null) {
@@ -534,12 +547,14 @@ export class EndlessEnv {
           if (count <= 0 || (shielded && t !== PokeballType.MASTER_BALL)) {
             continue;
           }
-          this.add(p, { id: `ball:${t}`, label: `Throw ${PokeballType[t]}`, data: { ball: t, count } }, () =>
+          this.add(p, { id: `ball:${t}`, label: `Throw ${enumName(PokeballType, t)}`, data: { ball: t, count } }, () =>
             phase.handleCommand(Command.BALL, t),
           );
         }
       }
-      this.add(p, { id: "run", label: "Run" }, () => phase.handleCommand(Command.RUN, 0));
+      if (!mon.isTrapped([], true)) {
+        this.add(p, { id: "run", label: "Run" }, () => phase.handleCommand(Command.RUN, 0));
+      }
     }
     return p;
   }
@@ -637,7 +652,7 @@ export class EndlessEnv {
         cb(...args);
         return true;
       };
-    const p = this.base(phase, "party", { sub: PartyUiMode[mode] });
+    const p = this.base(phase, "party", { sub: enumName(PartyUiMode, mode) });
     const cancel = (label = "Cancel") => this.add(p, { id: "cancel", label }, call(6, PartyOption.CANCEL));
     const slots = (option: PartyOption, from = 0) => {
       for (let s = from; s < party.length; s++) {
@@ -682,7 +697,9 @@ export class EndlessEnv {
         slots(PartyOption.SELECT);
         break;
       case PartyUiMode.RELEASE:
-        slots(PartyOption.RELEASE);
+        party.forEach((q, s) => {
+          this.add(p, { id: `slot:${s}`, label: `Release ${q.name}`, data: { slot: s, species: q.species.speciesId } }, () => releaseSlot(scene, h, s));
+        });
         cancel("Don't release");
         return p;
       case PartyUiMode.MOVE_MODIFIER: {
@@ -770,10 +787,25 @@ export class EndlessEnv {
   }
 
   private optionDecision(phase: any, name: string, h: AnyHandler): Pending {
+    const opts = h.options as any[];
+    // Caught a mon with a full party: menu is [Summary, Pokedex, Yes (pick one to release), No].
+    if (name === "AttemptCapturePhase" && opts.length === 4) {
+      const party = this.scene.getPlayerParty();
+      const caught = this.scene.getEnemyField().find(e => e.isActive(true)) ?? this.scene.getEnemyPokemon(false);
+      const p = this.base(phase, "catch_full", { context: { caught: caught?.name, species: caught?.species?.speciesId, level: caught?.level } });
+      party.forEach((q, s) => {
+        this.add(p, { id: `release:${s}`, label: `Release ${q.name} to keep ${caught?.name ?? "new mon"}`, data: { slot: s } }, () => {
+          this.pendingRelease = s;
+          return pickOption(h, 2);
+        });
+      });
+      this.add(p, { id: "keep_party", label: `Don't keep ${caught?.name ?? "new mon"}` }, () => pickOption(h, 3));
+      return p;
+    }
     const kind: DecisionKind = name === "SelectBiomePhase" ? "biome" : "option";
     const p = this.base(phase, kind, { sub: name, prompt: lastText(this.scene) });
-    (h.options as any[]).forEach((o, i) => {
-      if (o.selectable === false) {
+    opts.forEach((o, i) => {
+      if (o.selectable === false || INFO_LABELS.test(String(o.label ?? "").trim())) {
         return;
       }
       this.add(p, { id: `opt:${i}`, label: String(o.label ?? i) }, () => pickOption(h, i));
@@ -799,6 +831,26 @@ function pumpClock(scene: BattleScene): void {
   } catch {
     /* clock not ready yet */
   }
+}
+
+/**
+ * Release party slot s in PartyUiMode.RELEASE the way PartyUiHandler.doRelease does
+ * (remove its items, drop it from the party, then hand the cursor to the phase callback),
+ * minus the goodbye text box.
+ */
+function releaseSlot(scene: BattleScene, h: AnyHandler, s: number): boolean {
+  const party = scene.getPlayerParty();
+  if (s < 0 || s >= party.length) {
+    return false;
+  }
+  scene.removePartyMemberModifiers(s);
+  const released = party.splice(s, 1)[0];
+  released.destroy();
+  const cursor = s >= party.length ? s - 1 : s;
+  const cb = h.selectCallback;
+  h.selectCallback = null;
+  cb?.(cursor, PartyOption.RELEASE);
+  return true;
 }
 
 /** Select option i of an option/confirm menu the way the UI handler does on ACTION. */

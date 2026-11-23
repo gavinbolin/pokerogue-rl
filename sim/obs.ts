@@ -69,6 +69,15 @@ export interface Observation {
   items: { name: string; count: number }[]; // player-wide (non-held) modifiers
 }
 
+/** Name of an enum value; works for TS enums and the game's `as const` object enums alike. */
+export function enumName(e: object, v: unknown): string {
+  for (const [k, val] of Object.entries(e)) {
+    if (val === v && Number.isNaN(Number(k))) {
+      return k;
+    }
+  }
+  return String(v);
+}
 const safe = <T>(f: () => T, d: T): T => {
   try {
     return f();
@@ -76,10 +85,10 @@ const safe = <T>(f: () => T, d: T): T => {
     return d;
   }
 };
-const typeNames = (p: Pokemon) => safe(() => p.getTypes().map(t => PokemonType[t] ?? String(t)), [] as string[]);
+const typeNames = (p: Pokemon) => safe(() => p.getTypes().map(t => enumName(PokemonType, t)), [] as string[]);
 const statusName = (p: Pokemon) => {
   const e = p.status?.effect;
-  return e ? (StatusEffect[e] ?? String(e)) : null;
+  return e ? enumName(StatusEffect, e) : null;
 };
 
 function moveObs(p: Pokemon): MoveObs[] {
@@ -89,7 +98,7 @@ function moveObs(p: Pokemon): MoveObs[] {
     return {
       id: m.moveId,
       name: safe(() => m.getName(), String(m.moveId)),
-      type: PokemonType[mv.type] ?? String(mv.type),
+      type: enumName(PokemonType, mv.type),
       category: mv.category,
       power: mv.power,
       accuracy: mv.accuracy,
@@ -147,8 +156,8 @@ export function observe(scene: BattleScene): Observation {
   return {
     wave: battle?.waveIndex ?? 0,
     turn: battle?.turn ?? 0,
-    biome: BiomeId[scene.arena?.biomeId] ?? String(scene.arena?.biomeId),
-    battleType: battle ? (BattleType[battle.battleType] ?? String(battle.battleType)) : "NONE",
+    biome: enumName(BiomeId, scene.arena?.biomeId),
+    battleType: battle ? enumName(BattleType, battle.battleType) : "NONE",
     double: !!battle?.double,
     money: scene.money,
     weather: scene.arena?.weather?.weatherType ?? null,
