@@ -170,6 +170,11 @@ export class EndlessEnv {
 
   // ---------------------------------------------------------------- boot
 
+  /** The live game scene (read-only use: visuals for the play UI). Undefined before reset(). */
+  get sceneRef(): BattleScene | undefined {
+    return this.scene;
+  }
+
   /** Messages the game displayed since the previous call. */
   drainMessages(): string[] {
     return this.messages.splice(0, this.messages.length);
@@ -209,6 +214,9 @@ export class EndlessEnv {
     }
     scene.setSeed(seed);
     scene.resetSeed(0);
+    // The real game sets the starting money in the starter-select screen's startRun() (which this
+    // harness bypasses by calling initBattle directly), so do the same here: 1000 in Endless.
+    scene.money = scene.gameMode.getStartingMoney();
     const starters = buildStarters(scene, this.team.speciesIds);
     scene.phaseManager.pushNew("EncounterPhase", false);
     new SelectStarterPhase().initBattle(starters);
