@@ -14,8 +14,8 @@ No heuristics live here. The only policy so far is uniform-random over the legal
 
 | Path | What |
 |---|---|
-| `pokerogue.pin` | Game repo + commit (`e1a0c20`) + locales commit. The assets submodule is not needed. |
-| `scripts/setup.mjs` | Fresh clone of the game at the pin into `vendor/pokerogue` (gitignored), then `pnpm install`. |
+| `pokerogue.pin` | Game repo + release tag/commit (`v1.12.2.8` = `915fae1`, the live release) + the locales and assets submodule commits at that tag. |
+| `scripts/setup.mjs` | Clones the game at the pin into `vendor/pokerogue` (gitignored), or moves an existing clean checkout to a new pin; updates locales / assets; reruns `pnpm install` whenever the lockfile changed. |
 | `scripts/run.mjs` | CLI: runs seeds in N parallel vitest processes and prints a summary. |
 | `scripts/stats.mjs` | Summarizes a run folder: outcomes, waves cleared, decision types, legal-action counts. |
 | `scripts/serve.mjs` | Starts the long-lived sim server (`npm run play`): HTTP play UI + JSON-lines TCP API. |
@@ -38,10 +38,39 @@ No heuristics live here. The only policy so far is uniform-random over the legal
 Requires Node ≥ 24.9 and git. pnpm comes through the game's bundled corepack.
 
 ```powershell
-node scripts/setup.mjs        # clones pagefaultgames/pokerogue@e1a0c20 + locales, pnpm install,
-                              # and a sparse ~85 MB checkout of pokerogue-assets@8250b23 (play-UI art) into
+node scripts/setup.mjs        # clones pagefaultgames/pokerogue@v1.12.2.8 (915fae1) + locales@13867fb, pnpm install,
+                              # and a sparse ~85 MB checkout of pokerogue-assets@b7ce101 (play-UI art) into
                               # vendor/pokerogue-assets (skip with --no-assets; the sim itself never loads art)
 ```
+
+After a pin change just rerun `node scripts/setup.mjs`: it moves the existing checkouts to the new pin in place (it
+refuses if `vendor/pokerogue` has local edits) and reinstalls dependencies when `pnpm-lock.yaml` changed. The game's
+own git hooks (lefthook) are disabled for these git calls.
+
+## Game version
+
+The pin follows the **live release** (`main` branch / release tags of pagefaultgames/pokerogue), not the default
+`beta` dev branch, so recorded play matches pokerogue.net. To update: take the new release tag's commit, read the
+`assets` and `locales` gitlinks at that commit (`git ls-tree <tag> assets locales`), put all three in
+`pokerogue.pin`, rerun setup, the stress test, `api-check` and `ui-shots`. Every log's `start` record carries
+`gamePin`, and `resume` refuses runs recorded on another game commit (they stay reviewable; the Runs list shows them
+as "old game <sha>"), because replay is only exact on identical game code.
+
+History: `e1a0c20` (beta, Oct 30 2026, Phaser 4) until 2026-11-23, then `v1.12.2.8` (`915fae1`, main, Nov 18 2026).
+Notes on that move:
+
+- `e1a0c20` was a beta commit with 4 commits that never reached main, most importantly the Phaser 3 → 4 upgrade.
+  The live game is still on **Phaser 3.90** (`phaser3-rex-plugins`), so the move is partly a Phaser downgrade. The
+  harness only uses `Phaser.Game({type: HEADLESS})` and `Phaser.Math.RND`, so nothing broke.
+- Gameplay changes in the 40 release commits are small: Sketch fails when the user is transformed; Meloetta's
+  Relic Song form change is labelled; trainers no longer get wrong-typed mons and Scuba Diver left the Sea biome
+  (trainer-only, Endless has none); daily-run forced biomes can't repeat the current biome; the "Clowning Around"
+  mystery encounter was adjusted (MEs are off in Endless); event dates moved (the Halloween event now ended Nov 11).
+  The rest is UI / i18n / touch controls / Pokédex fixes and the version bump. A "Champions" patch was added and
+  reverted on Nov 17, so it is not in the release.
+- The 200-seed random stress test produced **identical decision traces** on both pins (200/200 seeds, same
+  actions, waves and enemy HP), so logs from before the move are still valid behaviour-cloning data in practice,
+  but are tagged with the old `gamePin`.
 
 ## Run
 
@@ -91,7 +120,7 @@ Typical legal-action counts (200 random runs): command 7.6 on average (2–12), 
 faint switch 3.2, catch_full 7, learn_move 5, move-target party 11.7 (up to 23).
 
 Not exposed yet: Tera, the shop's lock-rarity and item-transfer actions, and the run-history and summary
-screens.
+screens. See "Browser parity" below.
 
 ## Log format (`runs/<out>/endless_seed<N>_<policy>.jsonl`)
 
@@ -203,15 +232,16 @@ prompt, context, actions, obs}, messages: [battle text since the last response],
 10 ms per round trip with obs).
 
 `node scripts/api-check.mjs` checks a running server end to end: team validation, a logged run, stale-click rejection,
-detach, resume by replay landing on the identical decision, review, and an agent run to the end.
+detach, resume by replay landing on the identical decision, review, an old-game-version run listed as such and
+refused on resume, and an agent run to the end.
 
 ## Performance (BOREN-0: 12 threads, Node 24)
 
 - A vitest cold start is about 20–25 s per process. After that, each boot (reset) takes about 0.1 s.
 - Play speed on one process: about 210–235 decisions/s and 24–26 waves/s (random policy, obs on or off).
 - 200 runs with `--parallel 6` finish in 80 s of wall time, about 185 decisions/s in total (14.8k decisions).
-- A random policy wipes on average at wave 9 (median 9, max 19). The 200-seed stress test (seeds 1000–1199) ended in 200/200 wipes,
-  with 0 stalls, 0 errors and 0 rejected actions.
+- A random policy wipes on average at wave 9 (mean 9.21 cleared, median 9, max 19). The 200-seed stress test (seeds
+  1000–1199) ended in 200/200 wipes, with 0 stalls, 0 errors and 0 rejected actions, on both `e1a0c20` and `v1.12.2.8`.
 
 ## Notes
 
@@ -220,3 +250,22 @@ detach, resume by replay landing on the identical decision, review, and an agent
   started at ₽0 (logs from before then have money 0). Wild battles award no money in PokéRogue (only trainer battles
   push `MoneyRewardPhase`, and Endless has no trainers), so money only changes through shop spending, rerolls, and
   money items or moves (Amulet Coin, Pay Day, …). With the fix, random play buys about 10x more shop items.
+
+## Browser parity (for a future pokerogue.net adapter)
+
+The goal is that a policy trained here can later drive the real browser game through an adapter. The action set
+should therefore become exactly the live UI's. Gaps on `v1.12.2.8`, with rough effort to add each to the env, the
+log format and the play UI (not implemented yet):
+
+| Gap | What the live game has | Effort |
+|---|---|---|
+| Tera | Command menu Tera toggle once you hold a Tera Orb; the move then terastallizes the mon | ~0.5–1 day (`tera+move:i` actions, obs fields, UI button) |
+| Lock rarity | Reward screen toggle with a Lock Capsule; rerolls keep tiers | ~0.5 day |
+| Item transfer (and discard) | Reward screen "Transfer": pick source mon, held item, quantity, target mon (or discard) | ~1–1.5 days (multi-step sub-decisions) |
+| Check team / summary / Pokédex | Informational screens from battle and reward | ~0.5 day UI only; no game effect, so no actions |
+| Starter select | Real starter screen with the account's unlocks: ability, nature, form, gender, shiny/variant, passive, egg moves, candy cost reductions | ~1–2 days to model starter config; the live account decides what is legal |
+| Settings parity | Battle style, EXP display, skip-seen-dialogue etc. affect which prompts appear | ~0.5 day (match a fixed settings profile) |
+| Browser adapter itself | Read on-screen state and press keys with animation timing | separate project, ~3–5 days |
+
+Everything already exposed (moves, switches, balls, run, targets, rewards, shop, reroll, skip, party targets,
+learn/forget, release, biome / yes-no options) maps 1:1 to a live UI action.
