@@ -4,13 +4,17 @@
  * Plays a short logged "human" run with random choices, detaches, resumes it by replay, plays on,
  * abandons it, then lists and reviews it. Logs land in runs/apicheck/ (not runs/human/).
  */
+import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const { values: v } = parseArgs({
   options: { port: { type: "string", default: "8766" }, steps: { type: "string", default: "25" }, shutdown: { type: "boolean", default: false } },
 });
 
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sock = net.connect(Number(v.port), "127.0.0.1");
 sock.setNoDelay(true);
 let buf = "";
@@ -103,6 +107,27 @@ if (!r.decision) {
 const rv = await call("review", { runId, policy: "apicheck" });
 const kinds = rv.records.map(x => x.t);
 check(kinds[0] === "start" && kinds.includes("d") && kinds.includes("end"), `review: ${rv.records.length} records (${[...new Set(kinds)].join(",")})`);
+
+// A paused run recorded on another game version must be listed as such and refuse to resume.
+{
+  const fixtureId = "apicheck-oldpin";
+  const fixture = path.join(ROOT, "runs", "apicheck", `${fixtureId}.jsonl`);
+  const start = { ...rv.records[0], runId: fixtureId, gamePin: "e1a0c20fcc78b7844920fd0f310f6f39a45e2fa9" };
+  fs.writeFileSync(fixture, `${JSON.stringify(start)}\n`);
+  try {
+    const list = await call("runs", { policy: "apicheck" });
+    const row = list.runs.find(x => x.runId === fixtureId);
+    check(row && row.sameGame === false && !row.ended, `old-version run listed as not same game (${row?.gamePin?.slice(0, 7)})`);
+    try {
+      await call("resume", { runId: fixtureId, policy: "apicheck" });
+      check(false, "old-version run refused on resume");
+    } catch (e) {
+      check(/recorded on game e1a0c20/.test(e.message), `old-version run refused on resume (${e.message.replace(/^resume: /, "")})`);
+    }
+  } finally {
+    fs.rmSync(fixture, { force: true });
+  }
+}
 
 // Agent-style use: unlogged run, obs off, as fast as possible.
 r = await call("reset", { seed: "42", policy: "agent", obs: false });

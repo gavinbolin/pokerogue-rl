@@ -383,6 +383,8 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
             wave: end?.wave ?? last?.wave ?? 0,
             ended: end ? end.cause : null,
             active: run?.runId === start.runId,
+            gamePin: start.gamePin ?? null,
+            sameGame: start.gamePin === PIN,
           };
         })
         .sort((a, b) => String(b.time).localeCompare(String(a.time)));
@@ -409,8 +411,9 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
       if (recs.some(r => r.t === "end")) {
         fail("run already ended; use review");
       }
-      if (start.gamePin && PIN && start.gamePin !== PIN) {
-        fail(`run was recorded on game ${start.gamePin}, server is on ${PIN}`);
+      // Replay is only exact on the same game code: refuse runs from another (or an unknown) game pin.
+      if (start.gamePin !== PIN) {
+        fail(`run was recorded on game ${String(start.gamePin ?? "unknown").slice(0, 7)}, server is on ${String(PIN).slice(0, 7)}; it can be reviewed but not resumed`);
       }
       const opts: RunOptions = {
         seed: String(start.seed),

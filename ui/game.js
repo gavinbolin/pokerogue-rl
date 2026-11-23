@@ -1344,8 +1344,8 @@ async function openRuns() {
     ? `<table><tr><th>Started</th><th>Seed</th><th>Team</th><th>Wave</th><th>Decisions</th><th>Status</th><th></th></tr>${out.runs
         .map(
           r => `<tr><td>${esc(new Date(r.time).toLocaleString())}</td><td>${esc(r.seed)}</td><td>${esc(r.team.join(", "))}</td><td>${r.wave}</td><td>${r.decisions}</td>
-        <td>${r.ended ? esc(r.ended) : r.active ? "playing" : "paused"}</td>
-        <td>${!r.ended && !r.active ? `<button data-resume="${esc(r.runId)}">Resume</button> ` : ""}<button data-review="${esc(r.runId)}">Review</button></td></tr>`,
+        <td>${r.ended ? esc(r.ended) : r.active ? "playing" : r.sameGame === false ? `old game ${esc(String(r.gamePin ?? "?").slice(0, 7))}` : "paused"}</td>
+        <td>${!r.ended && !r.active && r.sameGame !== false ? `<button data-resume="${esc(r.runId)}">Resume</button> ` : ""}<button data-review="${esc(r.runId)}">Review</button></td></tr>`,
         )
         .join("")}</table>`
     : `<p class="muted">No human runs yet.</p>`;
