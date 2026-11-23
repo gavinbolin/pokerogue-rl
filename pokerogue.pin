@@ -1,9 +1,13 @@
 # Pinned PokeRogue game source (AGPL-3.0). Not vendored into git; fetched by scripts/setup.mjs.
+# Tracks the live release branch (main), not the default dev branch (beta).
+# Previous pin: e1a0c20fcc78b7844920fd0f310f6f39a45e2fa9 (beta, Oct 30 2026; Phaser 4) - see git history.
 repo=https://github.com/pagefaultgames/pokerogue.git
-commit=e1a0c20fcc78b7844920fd0f310f6f39a45e2fa9
-# locales submodule (needed for item / move names).
-locales=b24c6f3d1b3f4449440d0200487e614e69b5df3d
-# assets submodule commit (art for the play UI only; the sim never loads it). Sparse partial checkout
-# of just the images/fonts the UI uses (~85 MB) into vendor/pokerogue-assets, outside the game tree.
+# release tag v1.12.2.8 (main, Nov 18 2026)
+tag=v1.12.2.8
+commit=915fae1ee3b3994f29e72bfd42ce7779100252f8
+# locales submodule commit at that game commit (needed for item / move names).
+locales=13867fbd6295965521e8a9b7cdfa0476555ab3a0
+# assets submodule commit at that game commit (art for the play UI only; the sim never loads it). Sparse
+# partial checkout of just the images/fonts the UI uses (~85 MB) into vendor/pokerogue-assets, outside the game tree.
 assets_repo=https://github.com/pagefaultgames/pokerogue-assets.git
-assets=8250b23677d4918801fc6fc1e95b6dd1c30ef6c4
+assets=b7ce1013491141864da412fa733d5ac585b5d453
