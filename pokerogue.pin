@@ -1,0 +1,5 @@
+# Pinned PokeRogue game source (AGPL-3.0). Not vendored into git; fetched by scripts/setup.mjs.
+repo=https://github.com/pagefaultgames/pokerogue.git
+commit=e1a0c20fcc78b7844920fd0f310f6f39a45e2fa9
+# locales submodule (needed for item / move names). The assets submodule is NOT fetched.
+locales=b24c6f3d1b3f4449440d0200487e614e69b5df3d

@@ -1,0 +1,12 @@
+{
+  "name": "pokerogue-rl",
+  "private": true,
+  "type": "module",
+  "description": "Headless PokeRogue ENDLESS environment with a legal-action decision API (for BC / RL / RLHF).",
+  "engines": { "node": ">=24.9.0" },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "smoke": "node scripts/run.mjs --seed 1 --runs 5 --policy random",
+    "run": "node scripts/run.mjs"
+  }
+}

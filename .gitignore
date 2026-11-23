@@ -1,0 +1,6 @@
+# game checkout (fetched by scripts/setup.mjs at the pin) and its deps
+vendor/
+node_modules
+# run logs (jsonl per run, summaries)
+runs/
+*.log
