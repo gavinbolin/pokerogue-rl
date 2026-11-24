@@ -117,8 +117,13 @@ export const isDecision = (x: Decision | EndInfo): x is Decision => !(x as EndIn
  *   tera          - the command menu's Tera button (with a Tera Orb): `tera:i` = terastallize + move i
  *   lock_rarities - the reward screen's Lock Rarities toggle (with a Lock Capsule)
  *   item_discard  - Manage Items toggled to Discard (pick mon, item, quantity, confirm)
+ *   real_capture  - Poke Ball shake checks run as in the live game. The test framework's tween mock makes
+ *                   `addCounter` call only onComplete, so AttemptCapturePhase's shake counter never fired its
+ *                   onRepeat checks and every throw caught. With this on, that counter (capture phase only)
+ *                   fires onRepeat `repeat` times like Phaser, honours stop() (failCatch) and only then
+ *                   onComplete (catch). Same battle-seed RNG calls, in the same order, as live.
  */
-export const ALL_FEATURES = ["learn_confirm", "item_transfer", "tera", "lock_rarities", "item_discard"] as const;
+export const ALL_FEATURES = ["learn_confirm", "item_transfer", "tera", "lock_rarities", "item_discard", "real_capture"] as const;
 export type Feature = (typeof ALL_FEATURES)[number];
 
 export interface EnvOptions {
@@ -234,6 +239,9 @@ export class EndlessEnv {
    */
   async setFeatures(list: readonly string[]): Promise<Decision | EndInfo> {
     this.features_ = ALL_FEATURES.filter(f => list.includes(f));
+    if (this.scene) {
+      (this.scene as any)[REAL_CAPTURE] = this.has("real_capture");
+    }
     if (this.finished) {
       return this.finished;
     }
@@ -285,6 +293,7 @@ export class EndlessEnv {
     const scene = (this.scene = this.game.scene);
     vi.spyOn(scene.ui, "shouldSkipDialogue").mockReturnValue(true);
     patchUi(scene, this.messages);
+    (scene as any)[REAL_CAPTURE] = this.has("real_capture");
     this.trackModeChanges(scene);
     blockNetwork();
 
@@ -1402,9 +1411,48 @@ function patchUi(scene: BattleScene, sink: string[]): void {
       } catch {
         /* visual only */
       }
+      if ((scene as any)[REAL_CAPTURE] && isCaptureShakeCounter(scene, data)) {
+        return runRepeatingCounter(data);
+      }
       return addCounter(data);
     };
   }
+}
+
+/** Scene flag: feature real_capture is on for the current run (set by EndlessEnv on reset / setFeatures). */
+const REAL_CAPTURE = Symbol("realCapture");
+
+/** The shake counter of AttemptCapturePhase: a finite repeating counter with onRepeat, made during that phase. */
+function isCaptureShakeCounter(scene: BattleScene, data: any): boolean {
+  if (typeof data?.onRepeat !== "function" || !Number.isFinite(data.repeat) || data.repeat <= 0) {
+    return false;
+  }
+  const phase = scene.phaseManager?.getCurrentPhase() as any;
+  return (phase?.phaseName ?? phase?.constructor?.name) === "AttemptCapturePhase";
+}
+
+/**
+ * Phaser counter semantics without the timing: onRepeat fires `repeat` times, stop() ends it early (no
+ * onComplete, as Phaser's stop() does not complete a tween), else onComplete fires once. Runs on a microtask
+ * so the caller's `const counter = addCounter(...)` is assigned before onRepeat (which calls counter.stop()).
+ */
+function runRepeatingCounter(data: any) {
+  let stopped = false;
+  const counter = {
+    stop: () => {
+      stopped = true;
+    },
+    getValue: () => 1,
+  };
+  queueMicrotask(() => {
+    for (let i = 0; i < data.repeat && !stopped; i++) {
+      data.onRepeat(counter);
+    }
+    if (!stopped) {
+      data.onComplete?.(counter);
+    }
+  });
+  return counter;
 }
 
 /** Marks a LearnMovePhase while its "Stop trying to teach?" confirm (not the replace question) is up. */

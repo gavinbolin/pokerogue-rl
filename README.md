@@ -28,7 +28,7 @@ No heuristics live here. Policies so far: uniform-random over the legal actions,
 | `sim/env.ts` | `EndlessEnv`: boot, `reset()`, `step(index)`, legality, auto-advance of non-decisions. |
 | `sim/obs.ts` | `observe(scene)`: JSON observation (party, enemies, field, money, items). |
 | `sim/team.ts` | Seeded random starter team under the 15-point Endless cap. |
-| `sim/policies.ts` | `randomPolicy(seed)`. A policy is just `(decision) => index`. |
+| `sim/policies.ts` | `randomPolicy(seed)`, `catchPolicy(seed, throwProb)` (`catch` / `catch_late`, capture checks). A policy is just `(decision) => index`. |
 | `sim/log.ts` | Buffered jsonl run log. |
 | `sim/endless.test.ts` | The vitest "test" that drives env + policy + log for each seed. |
 | `runs/` | Output (gitignored). |
@@ -81,7 +81,7 @@ node scripts/run.mjs --seeds 3,9 --max-waves 50 --no-obs
 node scripts/stats.mjs runs/stress
 ```
 
-Options: `--seed N --runs K` or `--seeds a,b,c`, `--policy random`, `--max-waves N` (default: until wipe),
+Options: `--seed N --runs K` or `--seeds a,b,c`, `--policy random|catch|catch_late`, `--max-waves N` (default: until wipe),
 `--parallel P` (processes), `--out DIR` (default `runs/<policy>_<timestamp>`), `--no-obs`
 (log only the chosen action), `--team id,id,...` (fixed starters), `--turn-limit 300`,
 `--style set|switch`, `--stall-ms 30000`, `--verbose` (show game console).
@@ -154,6 +154,42 @@ record, and later replays switch at the same step. (Before this, the "Stop tryin
 shown as a second `learn_move` decision whose `keep` answered No and asked again, so you could not decline a
 move. The sim's settings helper never reached the game's settings object, so all runs so far used the game
 defaults, which is also what the live game uses.)
+
+**`real_capture` (Poké Ball shake checks).** Until 2026-11-24 every ball thrown in the sim caught the target
+(14,939 of 14,939 throws in the RL runs). The cause was the game's own test framework, not the live game code
+and not our env logic: its Phaser mock (`vendor/pokerogue/test/framework/game-wrapper.ts`) replaces
+`scene.tweens.addCounter` with a stub that only calls `onComplete`. `AttemptCapturePhase` does its 3 shake checks
+(1 on a critical capture) in the shake counter's `onRepeat`, and `onComplete` calls `catch()`, so the checks never
+ran. With the `real_capture` feature the env's `addCounter` wrapper runs `onRepeat` `repeat` times (then
+`onComplete` unless the phase called `stop()`), but only for the `AttemptCapturePhase` shake counter; everything
+else in the game code, including the formula, critical captures, boss rules and the seeded `randBattleSeedInt`
+calls, is the game's own. No vendor file was edited. Like the other features it is listed in `start.features`, so
+logs without it replay with always-catch and new runs use the real checks.
+
+Verification (`SIM_CAPTURE_AUDIT=1` writes `<out>/captures.jsonl` with each throw's inputs, the game's
+`shakeProbability` / critical chance and the result; `.venv\Scripts\python scripts\capstats.py <file>` compares the
+catch rate with the formula P = c/256·q + (1−c/256)·q³, q = shakeProbability/65536, P = 1 for a Master Ball or
+modified rate ≥ 255). The two scripts live in `scripts/`. Policies `catch` (always throws when it can) and `catch_late` (throws 25% of the time, else
+random, so more damaged / statused targets) exist for this. A fresh sim save has an empty dex, so the critical
+chance is 0 (the live game needs > 100 species caught); `SIM_TEST_DEX_COUNT=900` fakes a full dex for checking the
+critical path only. Never use it for logged data.
+
+| check | throws | caught | formula | z |
+|---|---|---|---|---|
+| without `real_capture` (control), seeds 6000–6019 | 149 | 100.0% | 53.4% | +11.6 (the bug) |
+| `catch`, seeds 6000–6149 | 1363 | 52.7% | 54.1% | −1.04 |
+| `catch_late`, seeds 7000–7149 | 1191 | 55.5% | 57.3% | −1.31 |
+| `catch_late`, fake dex 900 (crits), seeds 8000–8149 | 1098 | 64.6% | 61.4% | +2.28 |
+| `catch`, fake dex 900 (crits), seeds 8500–8699 | 1793 | 56.5% | 56.8% | −0.22 |
+| all four real-capture runs | 5445 | 56.95% | 57.12% | ≈ −0.3 |
+
+By ball, HP and status bucket every cell is within |z| < 2.5 (Poké, Great, Ultra, Rogue; HP 100% / 50–99% / 20–49% /
+< 20%; sleep, poison, paralysis, burn, freeze; bosses). The split of failures by shake (1st / 2nd / 3rd check)
+matches the model too (`scripts\shakes.py`; χ² with 3 df: 1.8, 2.0, 6.1 and 0.7).
+Old logs replay unchanged (728 runs on the current game pin, 81,508 decisions, 3,346 throws: 0 divergences, same
+per-step obs/action hashes as the previous commit on a sample). The 200-seed random stress test with real captures:
+200 wipes, 0 rejected actions, mean 7.63 waves cleared (random used to reach 9.21 partly because every throw
+added a party member).
 
 ## Log format (`runs/<out>/endless_seed<N>_<policy>.jsonl`)
 
