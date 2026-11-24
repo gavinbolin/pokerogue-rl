@@ -39,6 +39,14 @@ class RewardConfig:
     truncation_value: float = 0.0  # added when a run is cut (max_waves, turn/decision limit)
     limit_penalty: float = 0.0  # subtracted when a run is cut by a limit (turn / decision / stall / time / per-wave
     #                             decision cap), not by a wipe or max_waves; discourages menu loops
+    # --- battle shaping (all 0 = off). Only uses what the live UI shows (levels, HP, fainted, wave). ---
+    major_boss_bonus: float = 0.0  # extra for clearing a wave that is a multiple of 50 (on top of boss_bonus)
+    exp_per_level: float = 0.0  # per party level gained (same mon id, between decisions); EXP proxy, see below
+    exp_step_cap: float = 1.0  # cap on the level reward in one step
+    win_bonus: float = 0.0  # per foe, when a battle ends by KO (not fled, not caught)
+    catch_bonus: float = 0.0  # when a battle ends with a catch
+    hp_keep: float = 0.0  # x (party HP fraction at battle end / at battle start, clipped to [0, 1]); won battles only
+    faint_penalty: float = 0.0  # per own mon that newly faints (any battle, fled or not)
 
     @classmethod
     def from_any(cls, x):
@@ -47,6 +55,21 @@ class RewardConfig:
         if isinstance(x, cls):
             return x
         return cls(**x)
+
+
+RUN_SLOT = 21
+FIGHT_SLOTS = set(range(0, 10))  # move:i, tera:i, struggle
+BALL_SLOTS = set(range(16, 21))
+COMPONENTS = ("wave", "boss", "exp", "win", "hp_keep", "faint", "hp_delta", "step", "wipe", "limit")
+COUNTERS = ("cmd", "run", "fight", "ball", "switch", "won", "fled", "caught", "levels")
+
+
+def party_levels(obs: dict) -> dict:
+    return {m.get("id"): m.get("level") or 0 for m in obs.get("party") or [] if m.get("id") is not None}
+
+
+def party_fainted(obs: dict) -> set:
+    return {m.get("id") for m in obs.get("party") or [] if m.get("fainted") or (m.get("hp") or 0) <= 0}
 
 
 def party_hp_frac(obs: dict) -> float:
@@ -138,7 +161,13 @@ class PokeRogueEnv(gym.Env):
         d = r["decision"]
         self.wave = d.get("wave") or 1
         self.cleared = max(self.wave - 1, 0)
-        self.hp = party_hp_frac(d.get("obs") or {})
+        o = d.get("obs") or {}
+        self.hp = party_hp_frac(o)
+        self.comp = dict.fromkeys(COMPONENTS, 0.0)
+        self.cnt = dict.fromkeys(COUNTERS, 0)
+        self._levels, self._fainted = party_levels(o), party_fainted(o)
+        self._battle_start_hp, self._battle_open, self._last_cmd = self.hp, d.get("kind") != "reward", None
+        self._foes = len(o.get("enemies") or [])
         self._fresh = (self._observe(d), self._info({"kind": d.get("kind")}))
         return self._fresh
 
@@ -150,37 +179,76 @@ class PokeRogueEnv(gym.Env):
                 raise ValueError(f"illegal action slot {a} at {self._decision.get('kind')} (legal: {sorted(self._s2i)})")
             a = self._rng.choice(sorted(self._s2i))
         idx = self._s2i[a]
+        kind = self._decision.get("kind")
+        if kind == "command":
+            self.cnt["cmd"] += 1
+            self.cnt["run"] += a == RUN_SLOT
+            self.cnt["fight"] += a in FIGHT_SLOTS
+            self.cnt["ball"] += a in BALL_SLOTS
+            self.cnt["switch"] += 10 <= a <= 15
+            self._last_cmd = a
         r = self.client.step(idx, expect=self._decision["actions"][idx]["id"])
         self.decisions += 1
         cfg = self.reward_cfg
-        rew = -cfg.step_cost
+        comp = dict.fromkeys(COMPONENTS, 0.0)
+        comp["step"] = -cfg.step_cost
         if "end" in r:
             end = r["end"] or {}
             cleared = int(end.get("wavesCleared", self.cleared))
-            rew += self._wave_reward(self.cleared, cleared)
+            self._wave_reward(self.cleared, cleared, comp)
             self.cleared = cleared
             self.wave = end.get("wave", self.wave)
             cause = str(end.get("cause"))
             terminated = cause == "wipe"
             if terminated:
-                rew -= cfg.wipe_penalty
+                comp["wipe"] -= cfg.wipe_penalty
                 if cfg.hp_delta:
-                    rew -= cfg.hp_delta * self.hp
+                    comp["hp_delta"] -= cfg.hp_delta * self.hp
+                newly = {i for i in self._levels if i not in self._fainted}  # the rest of the party fell
+                comp["faint"] -= cfg.faint_penalty * len(newly)
             else:
-                rew += cfg.truncation_value
+                comp["limit"] += cfg.truncation_value
                 if not cause.startswith("max_waves"):
-                    rew -= cfg.limit_penalty
-            return self._terminal_obs(), rew, terminated, not terminated, self._info({"end": cause, "kind": "end"})
+                    comp["limit"] -= cfg.limit_penalty
+            rew = self._add(comp)
+            return self._terminal_obs(), rew, terminated, not terminated, self._info(self._episode_info({"end": cause, "kind": "end"}))
         d = r["decision"]
+        o = d.get("obs") or {}
         wave = d.get("wave") or self.wave
         cleared = max(self.cleared, wave - 1)
-        rew += self._wave_reward(self.cleared, cleared)
-        self.wave_decisions = 0 if wave != self.wave else self.wave_decisions + 1
+        self._wave_reward(self.cleared, cleared, comp)
+        new_wave = wave != self.wave
+        self.wave_decisions = 0 if new_wave else self.wave_decisions + 1
         self.cleared, self.wave = cleared, wave
-        hp = party_hp_frac(d.get("obs") or {})
+        hp = party_hp_frac(o)
         if cfg.hp_delta:
-            rew += cfg.hp_delta * (hp - self.hp)
-        self.hp = hp
+            comp["hp_delta"] += cfg.hp_delta * (hp - self.hp)
+        # levels gained by mons that were already in the party (EXP proxy: the sim shows level, not the EXP bar)
+        levels = party_levels(o)
+        gained = sum(max(lv - self._levels[i], 0) for i, lv in levels.items() if i in self._levels)
+        self.cnt["levels"] += gained
+        comp["exp"] += min(cfg.exp_per_level * gained, cfg.exp_step_cap)
+        fainted = party_fainted(o)
+        comp["faint"] -= cfg.faint_penalty * len({i for i in fainted - self._fainted if i in self._levels})
+        # battle end: the reward screen (won / caught) or a new wave without one (fled, or no rewards)
+        if self._battle_open and (d.get("kind") == "reward" or new_wave):
+            if self._last_cmd == RUN_SLOT:
+                self.cnt["fled"] += 1
+            elif self._last_cmd in BALL_SLOTS:  # ended by a catch: no KO bonus (else catching becomes the new shortcut)
+                self.cnt["caught"] += 1
+                comp["win"] += cfg.catch_bonus
+            else:
+                self.cnt["won"] += 1
+                comp["win"] += cfg.win_bonus * max(self._foes, 1)
+                if cfg.hp_keep and self._battle_start_hp > 0:
+                    comp["hp_keep"] += cfg.hp_keep * min(max(hp / self._battle_start_hp, 0.0), 1.0)
+            self._battle_open = False
+        if new_wave:  # next battle starts
+            self._battle_open, self._battle_start_hp, self._last_cmd = True, hp, None
+            self._foes = len(o.get("enemies") or [])
+        elif self._battle_open:
+            self._foes = max(self._foes, len(o.get("enemies") or []))
+        self._levels, self._fainted, self.hp = levels, fainted, hp
         info = self._info({"kind": d.get("kind")})
         truncated = False
         if self.decisions >= self.max_decisions:
@@ -190,20 +258,34 @@ class PokeRogueEnv(gym.Env):
         elif self.max_wave_decisions and self.wave_decisions >= self.max_wave_decisions:
             truncated, info["end"] = True, f"py_wave_decision_limit:{self.max_wave_decisions}"
         if truncated:
-            rew += cfg.truncation_value - cfg.limit_penalty
+            comp["limit"] += cfg.truncation_value - cfg.limit_penalty
             try:
                 self.client.call("abandon")
             except Exception:
                 pass
+        rew = self._add(comp)
+        if truncated:
+            info = self._episode_info(info)
         return self._observe(d), rew, False, truncated, info
 
-    def _wave_reward(self, old: int, new: int) -> float:
+    def _add(self, comp: dict) -> float:
+        for k, v in comp.items():
+            self.comp[k] += v
+        return float(sum(comp.values()))
+
+    def _episode_info(self, info: dict) -> dict:
+        """Per-episode reward components (r_<name>) and action / battle counters (n_<name>) on the last step."""
+        info.update({f"r_{k}": v for k, v in self.comp.items()})
+        info.update({f"n_{k}": v for k, v in self.cnt.items()})
+        return info
+
+    def _wave_reward(self, old: int, new: int, comp: dict) -> None:
         if new <= old:
-            return 0.0
-        r = self.reward_cfg.per_wave * (new - old)
-        if self.reward_cfg.boss_bonus:
-            r += self.reward_cfg.boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 10 == 0)
-        return r
+            return
+        cfg = self.reward_cfg
+        comp["wave"] += cfg.per_wave * (new - old)
+        comp["boss"] += cfg.boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 10 == 0)
+        comp["boss"] += cfg.major_boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 50 == 0)
 
     def action_masks(self):  # sb3-contrib MaskablePPO convention
         return self._mask.astype(bool)
