@@ -104,6 +104,11 @@ class PokeRogueEnv(gym.Env):
         return info
 
     def reset(self, *, seed=None, options=None):
+        # gymnasium 1.4 AsyncVectorEnv (shared_memory=False) keeps a stale autoreset flag across vec.reset(), so
+        # the first step after a reset can call reset() again; ignore a seedless reset of an unplayed episode
+        # instead of skipping a seed.
+        if seed is None and getattr(self, "_fresh", None) is not None:
+            return self._fresh
         super().reset(seed=seed)
         if seed is not None:
             self.base, self.episode = int(seed), 0
@@ -129,9 +134,11 @@ class PokeRogueEnv(gym.Env):
         self.wave = d.get("wave") or 1
         self.cleared = max(self.wave - 1, 0)
         self.hp = party_hp_frac(d.get("obs") or {})
-        return self._observe(d), self._info({"kind": d.get("kind")})
+        self._fresh = (self._observe(d), self._info({"kind": d.get("kind")}))
+        return self._fresh
 
     def step(self, action):
+        self._fresh = None
         a = int(action)
         if a not in self._s2i:
             if self.invalid_action != "random":

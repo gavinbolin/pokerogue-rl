@@ -8,7 +8,7 @@ does not share any code with the Classic-mode data-science project. The roadmap:
 3. RL fine-tuning (PPO with action masking) on top of the cloned policy.
 4. RLHF / preference tuning on the decisions that matter.
 
-No heuristics live here. The only policy so far is uniform-random over the legal actions.
+No heuristics live here. Policies so far: uniform-random over the legal actions, and a behaviour-cloned net (see Python training side).
 
 ## Layout
 
@@ -292,6 +292,105 @@ refused on resume, and an agent run to the end.
   started at ₽0 (logs from before then have money 0). Wild battles award no money in PokéRogue (only trainer battles
   push `MoneyRewardPhase`, and Endless has no trainers), so money only changes through shop spending, rerolls, and
   money items or moves (Amulet Coin, Pay Day, …). With the fix, random play buys about 10x more shop items.
+
+## Python training side (BC / RL)
+
+Everything Python lives in `rl/` and runs from the project venv `.venv` (gitignored). Setup, once:
+
+```powershell
+Setup-Python.bat                     # or: powershell -ExecutionPolicy Bypass -File scripts\setup_py.ps1
+```
+
+It makes `.venv` with Python 3.12 (py launcher), installs `torch==2.11.0+cu128` from the PyTorch CUDA 12.8
+index plus `requirements.txt` (numpy, gymnasium), and checks the GPU (RTX 2070 SUPER: CUDA available, ~6.7 TFLOP/s
+fp32 matmul). System Pythons are untouched.
+
+Commands (from the repo root; `py` = `.venv\Scripts\python`):
+
+```powershell
+.venv\Scripts\python -m rl.bc                          # BC on runs/human, then eval 20 seeds: BC greedy / BC sampled / random
+.venv\Scripts\python -m rl.bc --epochs 60 --eval-episodes 0   # train only
+.venv\Scripts\python -m rl.evaluate --model runs\models\bc-<ts>.pt --sample --episodes 50
+.venv\Scripts\python -m rl.evaluate --random --episodes 50
+.venv\Scripts\python -m rl.throughput --servers 6 --seconds 60
+.venv\Scripts\python -m rl.servers --n 6               # keep 6 servers up (8800-8805) until Ctrl+C; pass --ports 8800,...,8805 to the others
+.venv\Scripts\python -m rl.trace_check 60               # determinism check: same seeds give the same decisions fresh and after 60 runs
+```
+
+Each command that needs the sim starts its own headless servers, one per env (`node scripts/serve.mjs --no-http
+--tcp-port P`; env k uses ports 8800+50k…; 8765/8766 are always refused, so Play.bat keeps working alongside) and
+stops them on exit (`shutdown`, then `taskkill /T` as a fallback). Server consoles go to `runs/_servers/serve-<port>.log`.
+A cold start is ~25 s for one server and ~50 s for 6 at once. `--servers N` sets how many.
+
+**Server recycling.** A long-lived sim server gets slower run after run (BOREN-0, one server, random policy:
+~115 decisions/s fresh, ~57 after ~40 runs, ~15 after ~140; decisions stay identical, checked with
+`python -m rl.trace_check`). The cause is somewhere in reusing the game scene across resets and is not fixed yet.
+So each env replaces its server every `--recycle-every` episodes (default 40): it starts a spare in the background
+and switches at the next reset once the spare is ready (`servers.RecyclingServer`). `--recycle-every 0` turns this
+off; servers started with `python -m rl.servers` and used via `--ports` are not recycled.
+
+| Module | What |
+|---|---|
+| `rl/client.py` | `SimClient(port)`: TCP JSON-lines client (`reset`, `step(index, expect)`, `call(cmd, ...)`). |
+| `rl/servers.py` | `SimServer`, `RecyclingServer` (per-env, recycled), `ServerPool(n)` / `python -m rl.servers`. |
+| `rl/actions.py` | Fixed masked action space (`N_ACTIONS = 213`) and `ActionMapper`; the slot table is in the module docstring. |
+| `rl/encode.py` | `ENCODER.encode(decision) -> float32[2071]`, identical for live server decisions and logged `d` records. |
+| `rl/env.py` | `PokeRogueEnv` (Gymnasium), `RewardConfig`, `make_vec_env(ports)` (AsyncVectorEnv, one worker per server). |
+| `rl/data.py` | BC loader: run logs -> (obs, mask, chosen slot). |
+| `rl/policy.py` | `MaskedPolicy` (MLP 2x256 + LayerNorm, masked logits, spare value head for PPO), save / load. |
+| `rl/bc.py`, `rl/evaluate.py`, `rl/throughput.py` | CLIs above. Models go to `runs/models/` with an `.eval.json` next to them. |
+
+**Agent runs are unlogged.** The env resets with `policy: "agent", log: false, visual: false`, so training and
+evaluation write nothing under `runs/` (in particular nothing in `runs/human/`).
+
+**Action space.** `Discrete(213)` with a mask. Every legal action id maps to one fixed slot; slots are shared
+between decision kinds where it is the same kind of button (the decision kind is in the observation):
+moves 0–3, Tera + move 4–7 (8 Tera Struggle, 9 Struggle), party slot 0–5 → 10–15 (switch / send out / item or TM
+target / release / transfer from+to / discard from), balls 16–20, run 21, targets 22–26, reward cards 27–34, shop
+35–44, reroll / skip / Manage Items / Lock Rarities 45–48, party move targets 49–72, forget / keep / stop / retry /
+keep party 73–80, options 81–88, item picks 89–105, quantities 106–115, transfer-mode / back / cancel-done /
+discard yes / no 116–120, Memory Mushroom relearn 121–168, splices 169–204, overflow 205–212 (unknown, out of range
+or colliding ids, in list order; counted in `ActionMapper.stats`, never hit so far). A slot outside the mask raises
+(`invalid_action="random"` picks a random legal slot instead).
+
+**Observation.** `Dict(obs=float32[2071], action_mask=int8[213])`, built only from the sim's observation, which
+is limited to what the live UI shows. Global block: wave (and boss / x50 flags), turn, double, money, battle type,
+biome, weather, terrain, ball counts, global items (hashed bag), Tera used, Lock Rarities, decision kind / sub /
+transfer stage, acting mon, the move being learned or targeted (type, category, power, accuracy, effectiveness vs
+each foe), legal-action count. Party: 6 × (level, HP %, max HP, status, types, stats, stat stages, on field,
+fainted, Tera, Tera type, held items (hashed), worst incoming multiplier from each foe's visible types, 4 moves ×
+(type, category, power, accuracy, PP, effectiveness vs each foe, STAB, out of PP)). Foes: 2 × (level, HP fraction,
+status, types, boss, segments, stat stages, shiny, Tera). Reward / shop cards: 18 × (tier, item type (hashed),
+price vs money). Effectiveness uses the standard type chart on visible types, like the game's move tint hints.
+
+**Rewards** are computed in Python (`RewardConfig`, pass `reward={...}` to the env): `per_wave` (1.0 per wave
+cleared), `boss_bonus` (extra per boss wave), `wipe_penalty`, `hp_delta` (× change in total party HP fraction),
+`step_cost`, `truncation_value`. A wipe is `terminated`; sim limits (turn limit, per-wave decision cap,
+`max_waves`) and the env's own `max_decisions` / `max_episode_seconds` are `truncated` (`info["end"]` has the cause).
+
+**Seeds.** In a vector env of n, `reset(seed=S)` makes env k play sim seeds S+k, S+k+n, …, so evaluation over
+seeds S…S+N-1 is the same set for every policy.
+
+### Throughput (BOREN-0, random policy, obs on, AsyncVectorEnv)
+
+| setup | decisions/s |
+|---|---|
+| 1 fresh server, sync, first 30 s | 115 |
+| 3 / 6 / 10 fresh servers, first 25–60 s | 181 / 251 / 278 |
+| 6 servers, 6 min sustained, recycling every 40 episodes | 167 (83–241 per minute) |
+| 6 servers, 6 min sustained, no recycling | 116 (256 in the first minute, 66 in the sixth) |
+
+Scaling is limited by the sim processes (each ~1 GB RAM and CPU-heavy; `run.mjs --parallel 6` is likewise ~185/s
+total), and a vector step waits for the slowest env, so long auto-advance steps and spare-server warm-ups stall the
+batch. 6–8 servers is the sweet spot on 12 threads. Fixing the per-reset slowdown in the sim would be the biggest
+speed-up for RL.
+
+### First BC smoke (2026-11-24, 1 human run = 125 decisions)
+
+40 epochs in 0.5 s on the GPU: train accuracy 0.93, held-out accuracy 0.72 on 18 decisions (chance 0.17). Played on
+seeds 9000-9019 (waves cleared): BC argmax mean 4.5 (8 of 20 runs stuck in a reward-screen loop until the sim
+per-wave decision cap), BC sampled 6.0, random 8.0 on this run (9.15 on an earlier run with the same seeds; ~9.2
+over 200 seeds). One run is far too little data; this only shows the pipeline works end to end.
 
 ## Browser parity (for a future pokerogue.net adapter)
 
