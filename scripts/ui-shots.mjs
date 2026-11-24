@@ -164,6 +164,15 @@ try {
   // Plays throwaway runs (random-ish, moves preferred) until both have come up.
   const todo = new Set(["learn", "transfer"]);
   const find = id => r.decision.actions.findIndex(a => a.id === id || a.id.startsWith(id));
+  // reward screen: Down from the cards into the bottom-right list, then Down to the wanted button
+  const toBottom = async id => {
+    const acts = r.decision.actions;
+    const bottom = acts.filter(a => !/^(reward|shop):/.test(a.id));
+    const n = (acts.some(a => a.id.startsWith("reward:")) ? 1 : 0) + (acts.some(a => a.id.startsWith("shop:")) ? 1 : 0) + Math.max(0, bottom.findIndex(a => a.id === id));
+    for (let k = 0; k < n; k++) {
+      await key("ArrowDown");
+    }
+  };
   const refresh = async () => {
     await sleep(600);
     r = await api("state");
@@ -189,9 +198,7 @@ try {
       if (todo.has("transfer") && d.kind === "reward" && find("transfer") >= 0) {
         todo.delete("transfer");
         await load();
-        for (let k = 0; k < 3; k++) {
-          await key("ArrowDown"); // to the bottom-right window
-        }
+        await toBottom("transfer"); // to Manage Items in the bottom-right window
         await shot("9-reward-manage-items");
         r = await api("step", { index: find("transfer") });
         await load();
@@ -222,6 +229,72 @@ try {
   }
   if (todo.size) {
     console.log(`(not reached: ${[...todo].join(", ")})`);
+  }
+
+  // 6. Tera, Lock Rarities and Discard. Tera Orb / Lock Capsule are rare drops, so this uses an
+  // unlogged run (log: false) and the debug_give test helper, which the server refuses on logged runs.
+  r = await api("reset", { seed: `${v.seed}-p2`, policy: "human", log: false });
+  r = await stepUntil(r, d => d.kind === "command", pickCmd);
+  r = await api("debug_give", {
+    items: [
+      { name: "TERA_ORB" },
+      { name: "LOCK_CAPSULE" },
+      { name: "QUICK_CLAW", slot: 0, count: 2 },
+      { name: "LEFTOVERS", slot: 0 },
+    ],
+  });
+  if (find("tera:") >= 0) {
+    await load();
+    await key("ArrowLeft"); // Fight -> Tera button
+    await shot("10-command-tera");
+    await key("z");
+    await shot("10-tera-fight"); // moves, "Terastallize -> <type>"
+    await key("z");
+    await sleep(400);
+    await shot("10-tera-text");
+    await refresh();
+    console.log(`tera: terasUsed=${r.decision?.obs?.terasUsed}`);
+  } else {
+    console.log("(no tera action offered)");
+  }
+  r = await stepUntil(r, d => d.kind === "reward", pickCmd);
+  if (r.decision && find("lock_rarities") >= 0) {
+    const before = r.decision.actions[find("reroll")]?.data?.cost;
+    await load();
+    await toBottom("lock_rarities");
+    await shot("11-reward-lock-rarities");
+    r = await api("step", { index: find("lock_rarities") });
+    await load();
+    await toBottom("lock_rarities");
+    await shot("11-reward-locked"); // Unlock Rarities, reroll re-priced by the locked tiers
+    console.log(`lock: reroll cost ${before} -> ${r.decision.actions[find("reroll")]?.data?.cost}`);
+    r = await api("step", { index: find("transfer") });
+    await load();
+    await shot("12-transfer-from-discard-button");
+    r = await api("step", { index: find("xfer_mode") });
+    await load();
+    await shot("12-discard-from");
+    const withClaw = r.decision.actions.findIndex(a => a.id.startsWith("discard_from:") && a.data?.items?.some(it => it.typeId === "QUICK_CLAW"));
+    r = await api("step", { index: withClaw >= 0 ? withClaw : find("discard_from:") });
+    await load();
+    await shot("12-discard-item");
+    const qc = r.decision.actions.findIndex(a => a.id.startsWith("discard_item:") && a.data?.typeId === "QUICK_CLAW");
+    r = await api("step", { index: qc >= 0 ? qc : find("discard_item:") });
+    if (r.decision.context?.stage === "qty") {
+      await load();
+      await shot("12-discard-qty");
+      r = await api("step", { index: find("discard_qty:1") });
+    }
+    await load();
+    await shot("12-discard-confirm"); // "Are you sure you want to discard these items?"
+    r = await api("step", { index: find("discard_yes") });
+    await load();
+    await shot("12-discard-done");
+  } else {
+    console.log("(lock rarities not offered)");
+  }
+  if (r.decision) {
+    await api("abandon");
   }
 } finally {
   try {
