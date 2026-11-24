@@ -51,7 +51,9 @@ function monVisual(scene: BattleScene, p: Pokemon, back: boolean): MonVisual {
   const form = safe(() => (p as any).getSpeciesForm(false, true), null as any);
   const formIndex = (p as any).formIndex ?? 0;
   const female = safe(() => (p as any).getGender?.() === 1, false);
-  const id = (b: boolean) => safe(() => String(form.getSpriteId(false, formIndex, false, 0, b)), String(p.species.speciesId));
+  // If the form lookup throws, fall back to the plain species sprite on the right side (never a front
+  // sprite for the player's mon).
+  const id = (b: boolean) => safe(() => String(form.getSpriteId(false, formIndex, false, 0, b)), `${b ? "back__" : ""}${p.species.speciesId}`);
   const sprite = id(back).replace(/__/g, "/");
   const base = String(p.species.speciesId);
   return {
