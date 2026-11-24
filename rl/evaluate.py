@@ -79,6 +79,7 @@ def main():
     ap.add_argument("--ports", help="use running servers (python -m rl.servers) instead of starting own ones")
     ap.add_argument("--recycle-every", type=int, default=40, help="replace each own sim server after this many episodes (0 = never)")
     ap.add_argument("--max-waves", type=int)
+    ap.add_argument("--base-port", type=int, default=8800, help="own servers use ports base+50k..; use another range (e.g. 9400) while a trainer runs")
     ap.add_argument("--max-episode-seconds", type=float, default=600)
     a = ap.parse_args()
     from .servers import parse_ports
@@ -86,7 +87,7 @@ def main():
     if ports is None:
         print(f"[sim] starting {a.servers} sim servers (own, recycled every {a.recycle_every} episodes; cold start ~25-60 s)", flush=True)
     try:
-        vec = make_vec_env(ports, n=a.servers, recycle_every=a.recycle_every, max_waves=a.max_waves, max_episode_seconds=a.max_episode_seconds)
+        vec = make_vec_env(ports, n=a.servers, recycle_every=a.recycle_every, max_waves=a.max_waves, max_episode_seconds=a.max_episode_seconds, base_port=a.base_port)
         try:
             if a.model:
                 import torch
