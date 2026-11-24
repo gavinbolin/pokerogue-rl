@@ -108,11 +108,12 @@ legal action is applied automatically and counted as `forced`. If the game ever 
 
 | kind | when | actions |
 |---|---|---|
-| `command` | battle turn per active mon | `move:i` (usable moves only), `switch:slot`, `ball:type` (wild, one foe, not in End), `run` (wild, not trapped), `struggle` |
+| `command` | battle turn per active mon | `move:i` (usable moves only), `switch:slot`, `ball:type` (wild, one foe, not in End), `run` (wild, not trapped), `struggle`; with a Tera Orb, while this arena's Tera is unused: `tera:i` / `tera:struggle` (Terastallize + that move; `context.teraType`) |
 | `target` | move needs a target in doubles | `target:BattlerIndex` |
-| `reward` | post-wave reward screen | `reward:i`, `shop:i` (affordable), `reroll` (affordable), `skip`, `transfer` (the "Manage Items" button, when some held item can move to another member) |
+| `reward` | post-wave reward screen | `reward:i`, `shop:i` (affordable), `reroll` (affordable), `skip`, `transfer` (the "Manage Items" button, when some member holds a transferable item), `lock_rarities` (with a Lock Capsule: toggles Lock / Unlock Rarities, re-prices `reroll`, stays on the screen; `context.lockRarities`) |
 | `party` (`sub` = PartyUiMode) | faint switch, item/TM/evo target, move PP target, … | `slot:s`, `slot:s/move:m`, `cancel` |
-| `party` / `MODIFIER_TRANSFER` | after `transfer`, one pick per decision; `context.stage` = `from` → `item` → `qty` (stacks only) → `to` | `xfer_from:s` / `cancel` (Done, back to the rewards); `xfer_item:i`, `xfer_item:all`; `xfer_qty:n`; `xfer_to:t`; `back` undoes the last pick |
+| `party` / `MODIFIER_TRANSFER` | after `transfer`, one pick per decision; `context.stage` = `from` → `item` → `qty` (stacks only) → `to` | `xfer_from:s` / `cancel` (Done, back to the rewards) / `xfer_mode` (Switch to Discard); `xfer_item:i`, `xfer_item:all`; `xfer_qty:n`; `xfer_to:t`; `back` undoes the last pick |
+| `party` / `DISCARD` | Manage Items toggled to Discard; `context.stage` = `from` → `item` → `qty` (stacks only) → `confirm` ("Are you sure you want to discard these items?") | `discard_from:s` / `cancel` (Done) / `xfer_mode` (Switch to Transfer); `discard_item:i`, `discard_item:all`; `discard_qty:n`; `discard_yes` / `discard_no` (back to the mon list); `back` |
 | `learn_move` | level-up / TM with 4 moves known: "Should a move be forgotten?" | `forget:i` (Yes + that move), `keep` (No / back out of the move list) |
 | `learn_move` / `stop_teaching` | after `keep`: "Stop trying to teach X?" | `stop` (Yes: not learned), `retry` (No: back to the question above) |
 | `catch_full` | caught a mon with a full party | `release:slot`, `keep_party` |
@@ -127,12 +128,26 @@ the game), "All" moves every item at full stacks, only mons that can take the it
 after a transfer you stay on the transfer screen until Done, as in the game. Transfers are free and don't
 use up the reward.
 
-Not exposed yet: Tera, lock rarity, item discard, Check Team's form-change items, and the run-history and
-summary screens. See "Browser parity" below.
+Tera, Lock Rarities and Discard follow the live handlers: Tera is offered when `CommandUiHandler.canTera()`
+would show the button (Tera Orb held, `canTerastallize`, `playerTerasUsed` + a Tera already planned this turn by
+the other mon < 1 per arena; it resets at the party heal / new arena as in the game). Lock Rarities calls the
+phase's own `toggleRerollLock` path, so the locked cost is the game's `getRerollCost(true)`: the sum of
+50/125/300/750/2000 per offered tier × ⌈wave/10⌉ × 2^rerolls (e.g. three commons on wave 1: ₽150 instead of
+₽250), and locked rerolls keep the tiers. Discard calls `tryDiscardHeldItemModifier` with the picked quantity
+("All" = every item at full stacks), as the game's confirm does. Obs gains `terasUsed`, `lockRarities`, and
+`teraType` / `tera` per mon (`tera` for foes).
+
+Not exposed yet: Check Team (form-change items, unpause evolution, unsplice, reorder, release from the reward
+screen) and the run-history / summary screens. See "Browser parity" below.
+
+`debug_give` (server only, `{items: [{name, count?, slot?}]}` by `modifierTypes` key) gives items on an
+**unlogged** run (`reset` with `log: false`); it is refused on logged runs, so no log contains it. `ui-shots`
+uses it to reach the Tera / Lock / Discard screens, since Tera Orbs and Lock Capsules are rare drops.
 
 **Live-UI features and old logs.** Actions added after the first runs were logged are grouped as features
-(`ALL_FEATURES` in `sim/env.ts`): `learn_confirm` (the stop-teaching confirm as its own decision) and
-`item_transfer`. New runs use all of them and list them in the `start` record (`features`). A run whose
+(`ALL_FEATURES` in `sim/env.ts`): `learn_confirm` (the stop-teaching confirm as its own decision),
+`item_transfer`, `tera`, `lock_rarities` and `item_discard`. Each feature only appends actions at the end of a
+list, so a log keeps its indexes under the features it recorded. New runs use all of them and list them in the `start` record (`features`). A run whose
 `start` has no `features` is replayed without them, so its old decision sequence is reproduced exactly; when
 such a run is resumed, the server switches it to all features at that point and writes them into the `resume`
 record, and later replays switch at the same step. (Before this, the "Stop trying to teach X?" confirm was
@@ -231,7 +246,8 @@ Runs, resume and review work as before:
 `node scripts/ui-shots.mjs` (with the server running) renders screenshots of the battle, fight menu, party,
 reward, battle text and, when they come up, catch-with-full-party, item target, doubles and game-over screens,
 then plays throwaway runs until it can show the learn-move flow (`8-*`) and Manage Items / transfer (`9-*`),
-into `runs/ui-shots/`. It uses a throwaway headless Edge with its own temp profile and debug port 9339 (never 9222).
+and on an unlogged run with `debug_give` the Tera button and Tera fight menu (`10-*`), Lock / Unlock Rarities
+(`11-*`) and the Discard stages (`12-*`), into `runs/ui-shots/`. It uses a throwaway headless Edge with its own temp profile and debug port 9339 (never 9222).
 
 ## Server API (for scripts and the future Python Gym env)
 
@@ -281,18 +297,17 @@ refused on resume, and an agent run to the end.
 
 The goal is that a policy trained here can later drive the real browser game through an adapter. The action set
 should therefore become exactly the live UI's. Gaps on `v1.12.2.8`, with rough effort to add each to the env, the
-log format and the play UI (not implemented yet):
+log format and the play UI (not implemented yet; Tera, Lock Rarities and item Discard are done):
 
 | Gap | What the live game has | Effort |
 |---|---|---|
-| Tera | Command menu Tera toggle once you hold a Tera Orb; the move then terastallizes the mon | ~0.5–1 day (`tera+move:i` actions, obs fields, UI button) |
-| Lock rarity | Reward screen toggle with a Lock Capsule; rerolls keep tiers | ~0.5 day |
-| Item discard | Manage Items screen toggles to Discard: pick mon, item / All, quantity, confirm | ~0.5 day (same stages as transfer) |
-| Check Team form changes | Reward screen "Check Team" party mode: use form-change items (Mega / G-Max toggles), unpause evolution, unsplice | ~0.5–1 day |
+| Check Team (reward screen) | Party in CHECK mode: Switch (reorder party), Unpause Evolution (species with evolutions), Unsplice (fused), Release, and one toggle per form-change item (Mega / G-Max / other; toggles `modifier.active` and triggers the form change), plus Summary / Pokédex / Rename (info only) | ~1 day (`check_*` actions, option sub-menu per mon, UI) |
+| Able / Not able labels | Transfer target list shows every member with Able / Not able; the env only offers the able ones | UI only |
 | Check team / summary / Pokédex | Informational screens from battle and reward | ~0.5 day UI only; no game effect, so no actions |
 | Starter select | Real starter screen with the account's unlocks: ability, nature, form, gender, shiny/variant, passive, egg moves, candy cost reductions | ~1–2 days to model starter config; the live account decides what is legal |
 | Settings parity | Battle style, EXP display, skip-seen-dialogue etc. affect which prompts appear | ~0.5 day (match a fixed settings profile) |
 | Browser adapter itself | Read on-screen state and press keys with animation timing | separate project, ~3–5 days |
 
 Everything already exposed (moves, switches, balls, run, targets, rewards, shop, reroll, skip, party targets,
-learn/forget and stop-teaching, held-item transfer, release, biome / yes-no options) maps to live UI input.
+learn/forget and stop-teaching, held-item transfer and discard, Tera, Lock Rarities, release, biome / yes-no
+options) maps to live UI input.
