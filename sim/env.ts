@@ -30,7 +30,7 @@ import { getGameMode } from "#app/game-mode";
 import { speciesDataRegistry } from "#app/global-species-data-registry";
 import { BattleScene as BattleSceneClass } from "#app/battle-scene";
 import * as BattleAnims from "#data/battle-anims";
-import { allMoves } from "#data/data-lists";
+import { allMoves, modifierTypes } from "#data/data-lists";
 import { Gender } from "#data/gender";
 import { BattleStyle } from "#enums/battle-style";
 import { BattleType } from "#enums/battle-type";
@@ -40,10 +40,13 @@ import { Command } from "#enums/command";
 import { GameModes } from "#enums/game-modes";
 import { PartyUiMode } from "#enums/party-ui-mode";
 import { PokeballType } from "#enums/pokeball";
+import { PokemonType } from "#enums/pokemon-type";
 import type { SpeciesId } from "#enums/species-id";
 import { UiMode } from "#enums/ui-mode";
 import { PlayerPokemon } from "#field/pokemon";
-import { HealShopCostModifier, PokemonHeldItemModifier } from "#modifiers/modifier";
+import { MAX_TERAS_PER_ARENA } from "#app/constants";
+import { HealShopCostModifier, LockModifierTiersModifier, PokemonHeldItemModifier } from "#modifiers/modifier";
+import { canTerastallize } from "#utils/pokemon-utils";
 import {
   FusePokemonModifierType,
   getPlayerShopModifierTypeOptionsForWave,
@@ -110,8 +113,11 @@ export const isDecision = (x: Decision | EndInfo): x is Decision => !(x as EndIn
  *   learn_confirm - the live "Stop trying to teach X?" confirm after declining a move (game setting
  *                   levelMoveConfirmation, on by default in the live game)
  *   item_transfer - the reward screen's Transfer button (move held items between party members)
+ *   tera          - the command menu's Tera button (with a Tera Orb): `tera:i` = terastallize + move i
+ *   lock_rarities - the reward screen's Lock Rarities toggle (with a Lock Capsule)
+ *   item_discard  - Manage Items toggled to Discard (pick mon, item, quantity, confirm)
  */
-export const ALL_FEATURES = ["learn_confirm", "item_transfer"] as const;
+export const ALL_FEATURES = ["learn_confirm", "item_transfer", "tera", "lock_rarities", "item_discard"] as const;
 export type Feature = (typeof ALL_FEATURES)[number];
 
 export interface EnvOptions {
@@ -162,7 +168,7 @@ export class EndlessEnv {
   private pendingSkip = false;
   private pendingForget: number | null = null;
   /** Held-item transfer in progress (party screen in MODIFIER_TRANSFER mode): what's picked so far. */
-  private xfer: { from?: number; item?: number | "all"; qty?: number } = {};
+  private xfer: { from?: number; item?: number | "all"; qty?: number; confirm?: boolean } = {};
   private features_: Feature[];
   private pendingRelease: number | null = null;
   private step_ = 0;
@@ -193,6 +199,32 @@ export class EndlessEnv {
 
   has(f: Feature): boolean {
     return this.features_.includes(f);
+  }
+
+  /**
+   * Test/screenshot helper, never used by logged runs: give the player items by modifierTypes key
+   * (e.g. TERA_ORB, LOCK_CAPSULE; held items with `slot`), then re-read the pending decision.
+   */
+  async debugGive(items: { name: string; count?: number; slot?: number; type?: number }[]): Promise<Decision | EndInfo> {
+    const scene = this.scene as any;
+    for (const it of items) {
+      const f = (modifierTypes as any)[it.name];
+      if (typeof f !== "function") {
+        throw new Error(`unknown item ${it.name}`);
+      }
+      let t = f();
+      if (t?.is?.("ModifierTypeGenerator")) {
+        t = t.generateType([], it.type != null ? [it.type] : undefined);
+      }
+      const mon = it.slot != null ? scene.getPlayerParty()[it.slot] : undefined;
+      const m = t.withIdFromFunc(f).newModifier(mon);
+      if (mon) {
+        m.pokemonId = mon.id;
+      }
+      m.stackCount = it.count ?? 1;
+      scene.addModifier(m, true, false, false, true);
+    }
+    return this.setFeatures(this.features_);
   }
 
   /**
@@ -543,6 +575,9 @@ export class EndlessEnv {
       if (h.partyUiMode === PartyUiMode.MODIFIER_TRANSFER && this.has("item_transfer")) {
         return this.transferDecision(phase, h);
       }
+      if (h.partyUiMode === PartyUiMode.DISCARD && this.has("item_discard")) {
+        return this.discardDecision(phase, h);
+      }
       return this.partyDecision(phase, h);
     }
     if (mode === UiMode.SUMMARY && name === "LearnMovePhase" && typeof h.moveSelectFunction === "function" && this.pendingForget == null) {
@@ -658,7 +693,36 @@ export class EndlessEnv {
         this.add(p, { id: "run", label: "Run" }, () => phase.handleCommand(Command.RUN, 0));
       }
     }
+
+    // TERA (appended last so older runs' indices are unchanged): CommandUiHandler.canTera(), then the
+    // fight menu opened from the Tera button sends Command.TERA with the chosen move.
+    if (this.has("tera") && this.canTera(mon, fieldIndex)) {
+      p.decision.context!.canTera = true;
+      p.decision.context!.teraType = enumName(PokemonType, mon.getTeraType());
+      moveset.forEach((m, i) => {
+        if (m && mon.trySelectMove(i, false)[0]) {
+          this.add(p, { id: `tera:${i}`, label: `Tera + ${m.getName()}`, data: { moveId: m.moveId, teraType: enumName(PokemonType, mon.getTeraType()) } }, () => phase.handleCommand(Command.TERA, i));
+        }
+      });
+      if (usable === 0 && moveset.length > 0) {
+        this.add(p, { id: "tera:struggle", label: "Tera + Struggle" }, () => phase.handleCommand(Command.TERA, 0));
+      }
+    }
     return p;
+  }
+
+  /** CommandUiHandler.canTera: Tera Orb held, form allows it, and no Tera used (or planned by the ally) this arena. */
+  private canTera(mon: PlayerPokemon, fieldIndex: number): boolean {
+    const scene = this.scene;
+    try {
+      if (!mon.isPlayer() || !canTerastallize(mon)) {
+        return false;
+      }
+      const planned = +(scene.currentBattle.preTurnCommands[0]?.command === Command.TERA && fieldIndex > 0);
+      return scene.arena.playerTerasUsed + planned < MAX_TERAS_PER_ARENA;
+    } catch {
+      return false;
+    }
   }
 
   private targetDecision(phase: any, h: AnyHandler): Pending | null {
@@ -733,11 +797,23 @@ export class EndlessEnv {
       return true;
     });
     // Appended last so older runs' action indices are unchanged.
-    if (this.has("item_transfer") && this.transferSources().length) {
+    const canDiscard = this.has("item_discard") && this.scene.getPlayerParty().some((_, s) => this.heldTransferable(s).length > 0);
+    if ((this.has("item_transfer") && this.transferSources().length) || canDiscard) {
       this.add(p, { id: "transfer", label: "Manage Items", data: { desc: "Manage Pokémon held items (Transfer)." } }, () => {
         this.xfer = {};
         return press(0, 1)();
       });
+    }
+    // Lock Rarities (SelectModifierPhase.toggleRerollLock): shown with a Lock Capsule, refused when reroll is
+    // disabled. It flips scene.lockModifierTiers and re-prices the reroll; the reward screen stays open.
+    if (this.has("lock_rarities") && scene.findModifier(m => m instanceof LockModifierTiersModifier) && phase.getRerollCost(scene.lockModifierTiers) >= 0) {
+      const on = !!scene.lockModifierTiers;
+      p.decision.context!.lockRarities = on;
+      this.add(
+        p,
+        { id: "lock_rarities", label: on ? "Unlock Rarities" : "Lock Rarities", data: { locked: on, rerollCostAfter: phase.getRerollCost(!on), desc: "Lock item rarities on reroll (affects reroll cost)." } },
+        press(0, 3),
+      );
     }
     return p;
   }
@@ -805,6 +881,9 @@ export class EndlessEnv {
       for (const s of this.transferSources()) {
         this.add(p, { id: `xfer_from:${s}`, label: party[s].name, data: { slot: s, species: party[s].species.speciesId, items: this.heldTransferable(s).map(itemInfo) } }, () => ((this.xfer = { from: s }), true));
       }
+      if (this.has("item_discard")) {
+        this.add(p, { id: "xfer_mode", label: "Switch to Discard" }, () => this.toggleItemMode(h));
+      }
       this.add(p, { id: "cancel", label: "Done" }, () => {
         this.xfer = {};
         return callOnce(h, "selectCallback", 6, PartyOption.CANCEL);
@@ -853,6 +932,95 @@ export class EndlessEnv {
       });
     }
     back(x.item !== "all" && x.qty != null && items[x.item as number]?.getStackCount() > 1 ? { from, item: x.item } : { from });
+    return p;
+  }
+
+  /** The party screen's Transfer/Discard button (cursor 7): only while no transfer pick is in progress. */
+  private toggleItemMode(h: AnyHandler): boolean {
+    h.partyUiMode = h.partyUiMode === PartyUiMode.DISCARD ? PartyUiMode.MODIFIER_TRANSFER : PartyUiMode.DISCARD;
+    try {
+      h.partyDiscardModeButton?.toggleIcon?.(h.partyUiMode);
+    } catch {
+      /* visual only */
+    }
+    this.xfer = {};
+    return true;
+  }
+
+  /**
+   * Manage Items in Discard mode (PartyUiHandler.processDiscardMenuInput / doDiscard): mon -> item (or All)
+   * -> quantity (stacks) -> "Are you sure you want to discard these items?" Yes / No. Yes discards and goes
+   * back to choosing a mon; No goes back too. Done returns to the rewards, like Transfer mode.
+   */
+  private discardDecision(phase: any, h: AnyHandler): Pending {
+    const scene = this.scene;
+    const party = scene.getPlayerParty();
+    if (this.xfer.from != null && !this.heldTransferable(this.xfer.from).length) {
+      this.xfer = {};
+    }
+    const x = this.xfer;
+    const items = x.from == null ? [] : this.heldTransferable(x.from);
+    const single = typeof x.item === "number" ? items[x.item] : undefined;
+    const stage = x.from == null ? "from" : x.item == null ? "item" : single && x.qty == null && single.getStackCount() > 1 ? "qty" : "confirm";
+    const itemInfo = (it: PokemonHeldItemModifier) => ({ name: safeName(it), count: it.getStackCount(), typeId: (it.type as any)?.id });
+    const p = this.base(phase, "party", {
+      sub: "DISCARD",
+      prompt:
+        stage === "from"
+          ? "Choose a Pokémon. (Discard)"
+          : stage === "item"
+            ? "Select a held item to discard."
+            : stage === "qty"
+              ? "How many to discard?"
+              : "Are you sure you want to discard these items?",
+      context: { stage, from: x.from, item: x.item, qty: x.qty, items: items.map(itemInfo) },
+    });
+    const back = (to: typeof x) => this.add(p, { id: "back", label: "Back" }, () => ((this.xfer = to), true));
+    if (stage === "from") {
+      party.forEach((q, s) => {
+        if (this.heldTransferable(s).length) {
+          this.add(p, { id: `discard_from:${s}`, label: q.name, data: { slot: s, species: q.species.speciesId, items: this.heldTransferable(s).map(itemInfo) } }, () => ((this.xfer = { from: s }), true));
+        }
+      });
+      if (this.has("item_transfer")) {
+        this.add(p, { id: "xfer_mode", label: "Switch to Transfer" }, () => this.toggleItemMode(h));
+      }
+      this.add(p, { id: "cancel", label: "Done" }, () => {
+        this.xfer = {};
+        return callOnce(h, "selectCallback", 6, PartyOption.CANCEL);
+      });
+      return p;
+    }
+    const from = x.from!;
+    if (stage === "item") {
+      items.forEach((it, i) => {
+        this.add(p, { id: `discard_item:${i}`, label: `${safeName(it)} x${it.getStackCount()}`, data: itemInfo(it) }, () => ((this.xfer = { from, item: i }), true));
+      });
+      if (items.length > 1) {
+        this.add(p, { id: "discard_item:all", label: "All" }, () => ((this.xfer = { from, item: "all" }), true));
+      }
+      back({});
+      return p;
+    }
+    if (stage === "qty") {
+      for (let n = single!.getStackCount(); n >= 1; n--) {
+        this.add(p, { id: `discard_qty:${n}`, label: `x${n}`, data: { qty: n } }, () => ((this.xfer = { ...x, qty: n }), true));
+      }
+      back({ from });
+      return p;
+    }
+    // stage "confirm"
+    this.add(p, { id: "discard_yes", label: "Yes" }, () => {
+      if (x.item === "all") {
+        const qty = items.map(it => it.getStackCount());
+        items.forEach((it, i) => scene.tryDiscardHeldItemModifier(it, qty[i]));
+      } else if (single) {
+        scene.tryDiscardHeldItemModifier(single, x.qty ?? single.getStackCount());
+      }
+      this.xfer = {};
+      return true;
+    });
+    this.add(p, { id: "discard_no", label: "No" }, () => ((this.xfer = {}), true));
     return p;
   }
 

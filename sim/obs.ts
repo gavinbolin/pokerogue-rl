@@ -41,6 +41,8 @@ export interface MonObs {
   items: { name: string; count: number }[];
   onField: boolean;
   fainted: boolean;
+  teraType: string; // shown on the Tera button / summary
+  tera: boolean; // terastallized now
 }
 export interface EnemyObs {
   fieldIndex: number;
@@ -55,6 +57,7 @@ export interface EnemyObs {
   bossSegmentIndex: number;
   statStages: number[];
   shiny: boolean;
+  tera: boolean; // terastallized (its types are then the tera type)
 }
 export interface Observation {
   wave: number;
@@ -71,6 +74,8 @@ export interface Observation {
   enemies: EnemyObs[];
   balls: Record<string, number>;
   items: { name: string; count: number }[]; // player-wide (non-held) modifiers
+  terasUsed: number; // player Terastallizations used in this arena (max 1)
+  lockRarities: boolean; // reward-screen Lock Rarities toggle state
 }
 
 /** Name of an enum value; works for TS enums and the game's `as const` object enums alike. */
@@ -138,6 +143,8 @@ export function observe(scene: BattleScene): Observation {
     items: heldItems(scene, p),
     onField: p.isOnField(),
     fainted: p.isFainted(),
+    teraType: safe(() => enumName(PokemonType, p.getTeraType()), ""),
+    tera: !!p.isTerastallized,
   }));
   const enemies = (battle ? scene.getEnemyField() : []).map((p, fieldIndex) => ({
     fieldIndex,
@@ -152,6 +159,7 @@ export function observe(scene: BattleScene): Observation {
     bossSegmentIndex: (p as { bossSegmentIndex?: number }).bossSegmentIndex ?? 0,
     statStages: [...safe(() => p.getStatStages(), [] as number[])],
     shiny: !!p.shiny,
+    tera: !!p.isTerastallized,
   }));
   const balls: Record<string, number> = {};
   for (const [k, v] of Object.entries(scene.pokeballCounts ?? {})) {
@@ -174,5 +182,7 @@ export function observe(scene: BattleScene): Observation {
     items: scene.modifiers
       .filter(m => (m as { pokemonId?: number }).pokemonId === undefined)
       .map(m => ({ name: safe(() => m.type.name, m.constructor.name), count: m.getStackCount() })),
+    terasUsed: scene.arena?.playerTerasUsed ?? 0,
+    lockRarities: !!scene.lockModifierTiers,
   };
 }
