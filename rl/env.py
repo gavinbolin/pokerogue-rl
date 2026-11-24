@@ -37,6 +37,8 @@ class RewardConfig:
     hp_delta: float = 0.0  # x change in total party HP fraction between decisions
     step_cost: float = 0.0  # subtracted every decision
     truncation_value: float = 0.0  # added when a run is cut (max_waves, turn/decision limit)
+    limit_penalty: float = 0.0  # subtracted when a run is cut by a limit (turn / decision / stall / time / per-wave
+    #                             decision cap), not by a wipe or max_waves; discourages menu loops
 
     @classmethod
     def from_any(cls, x):
@@ -58,6 +60,7 @@ class PokeRogueEnv(gym.Env):
 
     def __init__(self, port: int | None = None, env_index: int = 0, num_envs: int = 1, base_seed: int = 0, reward=None,
                  max_waves: int | None = None, max_decisions: int = 20000, max_episode_seconds: float | None = None, team=None,
+                 max_wave_decisions: int | None = None,
                  invalid_action: str = "raise", connect_retry_s: float = 30.0,
                  base_port: int = 8800, recycle_every: int = 40):
         """port=None: the env starts and owns its own sim server (ports base_port + 50*env_index ...),
@@ -75,6 +78,7 @@ class PokeRogueEnv(gym.Env):
         self.reward_cfg = RewardConfig.from_any(reward)
         self.max_waves, self.max_decisions, self.team = max_waves, max_decisions, team
         self.max_episode_seconds = max_episode_seconds
+        self.max_wave_decisions = max_wave_decisions  # Python-side cap on decisions within one wave (None = sim's own cap)
         self.invalid_action = invalid_action
         self.mapper = ActionMapper()
         self.observation_space = gym.spaces.Dict({
@@ -127,6 +131,7 @@ class PokeRogueEnv(gym.Env):
         self.episode += 1
         r = self.client.reset(seed=self.sim_seed, team=self.team, max_waves=self.max_waves)
         self.decisions = 0
+        self.wave_decisions = 0
         self.t_start = time.time()
         if "decision" not in r:  # ended before any decision (shouldn't happen)
             raise RuntimeError(f"seed {self.sim_seed}: run ended at reset: {r.get('end')}")
@@ -163,11 +168,14 @@ class PokeRogueEnv(gym.Env):
                     rew -= cfg.hp_delta * self.hp
             else:
                 rew += cfg.truncation_value
+                if not cause.startswith("max_waves"):
+                    rew -= cfg.limit_penalty
             return self._terminal_obs(), rew, terminated, not terminated, self._info({"end": cause, "kind": "end"})
         d = r["decision"]
         wave = d.get("wave") or self.wave
         cleared = max(self.cleared, wave - 1)
         rew += self._wave_reward(self.cleared, cleared)
+        self.wave_decisions = 0 if wave != self.wave else self.wave_decisions + 1
         self.cleared, self.wave = cleared, wave
         hp = party_hp_frac(d.get("obs") or {})
         if cfg.hp_delta:
@@ -179,8 +187,10 @@ class PokeRogueEnv(gym.Env):
             truncated, info["end"] = True, f"py_decision_limit:{self.max_decisions}"
         elif self.max_episode_seconds and time.time() - self.t_start > self.max_episode_seconds:
             truncated, info["end"] = True, f"py_time_limit:{self.max_episode_seconds:g}s"
+        elif self.max_wave_decisions and self.wave_decisions >= self.max_wave_decisions:
+            truncated, info["end"] = True, f"py_wave_decision_limit:{self.max_wave_decisions}"
         if truncated:
-            rew += cfg.truncation_value
+            rew += cfg.truncation_value - cfg.limit_penalty
             try:
                 self.client.call("abandon")
             except Exception:
