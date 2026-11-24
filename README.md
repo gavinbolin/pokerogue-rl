@@ -322,10 +322,14 @@ Each command that needs the sim starts its own headless servers, one per env (`n
 stops them on exit (`shutdown`, then `taskkill /T` as a fallback). Server consoles go to `runs/_servers/serve-<port>.log`.
 A cold start is ~25 s for one server and ~50 s for 6 at once. `--servers N` sets how many.
 
-**Server recycling.** A long-lived sim server gets slower run after run (BOREN-0, one server, random policy:
-~115 decisions/s fresh, ~57 after ~40 runs, ~15 after ~140; decisions stay identical, checked with
-`python -m rl.trace_check`). The cause is somewhere in reusing the game scene across resets and is not fixed yet.
-So each env replaces its server every `--recycle-every` episodes (default 40): it starts a spare in the background
+**Long-lived servers.** The game's test mocks leak: `MockSprite.destroy()` leaves the wrapper in its container
+(`scene.field`, which `Pokemon.isOnField()` scans with `indexOf`) and every Phaser sprite's `anims` 'remove'
+listener piles up (eventemitter3 rebuilds that array on every destroy), so a server used to fall from ~120 to
+~13 decisions/s after ~130 runs. `housekeep(scene)` in `sim/env.ts` (run before each reset and at each new wave)
+drops only provably dead objects, the never-fired listeners, destroyed infinite timers and the write-only
+`MockTextureManager.list`; one server now holds ~120 decisions/s over 150 runs with identical decisions
+(`rl.trace_check 150`, and old logs replay identically). Recycling stays on as a safety net (memory still creeps
+slowly): each env replaces its server every `--recycle-every` episodes (default 40): it starts a spare in the background
 and switches at the next reset once the spare is ready (`servers.RecyclingServer`). `--recycle-every 0` turns this
 off; servers started with `python -m rl.servers` and used via `--ports` are not recycled.
 
@@ -382,8 +386,8 @@ seeds S…S+N-1 is the same set for every policy.
 
 Scaling is limited by the sim processes (each ~1 GB RAM and CPU-heavy; `run.mjs --parallel 6` is likewise ~185/s
 total), and a vector step waits for the slowest env, so long auto-advance steps and spare-server warm-ups stall the
-batch. 6–8 servers is the sweet spot on 12 threads. Fixing the per-reset slowdown in the sim would be the biggest
-speed-up for RL.
+batch. 6–8 servers is the sweet spot on 12 threads. (The sustained rows were measured before the
+housekeeping fix above.)
 
 ### First BC smoke (2026-11-24, 1 human run = 125 decisions)
 

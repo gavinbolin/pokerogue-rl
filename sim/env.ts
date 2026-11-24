@@ -27,6 +27,7 @@
  */
 import type { BattleScene } from "#app/battle-scene";
 import { getGameMode } from "#app/game-mode";
+import { globalScene } from "#app/global-scene";
 import { speciesDataRegistry } from "#app/global-species-data-registry";
 import { BattleScene as BattleSceneClass } from "#app/battle-scene";
 import * as BattleAnims from "#data/battle-anims";
@@ -272,6 +273,9 @@ export class EndlessEnv {
     // Keep the defaults (replays stay exact). levelMoveConfirmation=true is also the live default, i.e. the
     // "Stop trying to teach X?" confirm always appeared; feature learn_confirm just exposes it correctly.
     trackStopTeaching();
+    if (globalScene) {
+      housekeep(globalScene); // GameManager reuses the scene: drop the last run's dead objects first
+    }
 
     this.game = new GameManager(this.phaserGame, true);
     // GameManager forces max rolls on battle RNG and sows Phaser with "test"; undo both.
@@ -434,6 +438,7 @@ export class EndlessEnv {
           });
           this.waveStartedAt = Date.now();
           this.waveDecisions = 0;
+          housekeep(scene);
         }
         if (battle.turn > this.opts.turnLimit) {
           return this.end(`turn_limit:${this.opts.turnLimit}`);
@@ -1219,6 +1224,47 @@ const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Drop what the game's test mocks leak, so a long-lived server (or a long Endless run) stays fast.
+ * MockSprite.destroy() only destroys its inner Phaser sprite: the wrapper stays in its container
+ * (scene.field / fieldUI) and in MockTextureManager.list forever. Pokemon.isOnField() scans
+ * scene.field with indexOf, and every Phaser sprite registers on scene.anims 'remove' (eventemitter3
+ * rebuilds that whole array on each destroy), so both get slower run after run.
+ * Only provably dead things are removed; nothing a live object or the game logic reads changes:
+ *  - field / fieldUI: drop destroyed MockSprites and destroyed real Phaser objects (scene unset),
+ *    keeping order and always keeping entry 0 (MockContainer.getIndex returns -1 for index 0).
+ *  - anims 'remove' listeners: only fire on anims.remove(), which nothing in the game calls.
+ *  - clock: destroyed repeat:-1 TimerEvents (no callback) that Phaser never retires.
+ *  - MockTextureManager.list: write-only bookkeeping, never read.
+ */
+export function housekeep(scene: BattleScene): void {
+  try {
+    const dead = (o: any): boolean =>
+      o == null
+      || (o.phaserSprite !== undefined ? !o.phaserSprite?.scene : o instanceof Phaser.GameObjects.GameObject && !o.scene);
+    for (const c of [scene.field, scene.fieldUI] as any[]) {
+      const list: any[] | undefined = c?.list;
+      if (Array.isArray(list) && list.length > 1) {
+        const kept = list.filter((o, i) => i === 0 || !dead(o));
+        if (kept.length !== list.length) {
+          c.list = kept;
+        }
+      }
+    }
+    (scene.anims as any)?.removeAllListeners?.("remove");
+    const clock = scene.time as any;
+    if (Array.isArray(clock?._active)) {
+      clock._active = clock._active.filter((e: any) => !(e.repeat === -1 && !e.callback));
+    }
+    const tm = (scene as any).textures;
+    if (Array.isArray(tm?.list)) {
+      tm.list.length = 0;
+    }
+  } catch {
+    /* best effort: never let cleanup break a run */
+  }
 }
 
 /** Advance the mocked Phaser clock by one tick (the harness's MockClock fires every timer at 1ms). */
