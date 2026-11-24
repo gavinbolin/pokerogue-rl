@@ -56,17 +56,26 @@ def party_hp_frac(obs: dict) -> float:
 class PokeRogueEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, port: int, env_index: int = 0, num_envs: int = 1, base_seed: int = 0, reward=None,
+    def __init__(self, port: int | None = None, env_index: int = 0, num_envs: int = 1, base_seed: int = 0, reward=None,
                  max_waves: int | None = None, max_decisions: int = 20000, max_episode_seconds: float | None = None, team=None,
-                 invalid_action: str = "raise", connect_retry_s: float = 30.0):
-        self.port, self.env_index, self.num_envs = port, env_index, num_envs
+                 invalid_action: str = "raise", connect_retry_s: float = 30.0,
+                 base_port: int = 8800, recycle_every: int = 40):
+        """port=None: the env starts and owns its own sim server (ports base_port + 50*env_index ...),
+        replacing it every `recycle_every` episodes (see servers.RecyclingServer). port=N: use a running server."""
+        self.env_index, self.num_envs = env_index, num_envs
+        self.server = None
+        if port in (8765, 8766):
+            raise ValueError("ports 8765/8766 are the Play.bat server; refusing")
+        # connect lazily on the first reset (the vector env builds a throwaway copy just to read the spaces)
+        self.port, self._base_port, self._recycle_every = port, base_port, recycle_every
+        self._connect_retry_s = connect_retry_s
+        self.client = None
         self.base = base_seed + env_index
         self.episode = 0
         self.reward_cfg = RewardConfig.from_any(reward)
         self.max_waves, self.max_decisions, self.team = max_waves, max_decisions, team
         self.max_episode_seconds = max_episode_seconds
         self.invalid_action = invalid_action
-        self.client = SimClient(port, connect_retry_s=connect_retry_s)
         self.mapper = ActionMapper()
         self.observation_space = gym.spaces.Dict({
             "obs": gym.spaces.Box(-np.inf, np.inf, (OBS_DIM,), np.float32),
@@ -99,6 +108,16 @@ class PokeRogueEnv(gym.Env):
         if seed is not None:
             self.base, self.episode = int(seed), 0
             self._rng.seed(seed)
+        if self.client is None:
+            if self.port is None:
+                from .servers import RecyclingServer
+                self.server = RecyclingServer(self._base_port + 50 * self.env_index, self._recycle_every)
+                self.port = self.server.port
+            self.client = SimClient(self.port, connect_retry_s=self._connect_retry_s)
+        elif self.server is not None and self.server.on_reset():
+            self.client.close()
+            self.port = self.server.port
+            self.client = SimClient(self.port, connect_retry_s=30)
         self.sim_seed = self.base + self.episode * self.num_envs
         self.episode += 1
         r = self.client.reset(seed=self.sim_seed, team=self.team, max_waves=self.max_waves)
@@ -173,15 +192,25 @@ class PokeRogueEnv(gym.Env):
         return self._mask.astype(bool)
 
     def close(self):
-        self.client.close()
+        if self.client is not None:
+            self.client.close()
+            self.client = None
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
 
 
-def make_env(port: int, env_index: int = 0, num_envs: int = 1, **kw) -> PokeRogueEnv:
+def make_env(port: int | None, env_index: int = 0, num_envs: int = 1, **kw) -> PokeRogueEnv:
     return PokeRogueEnv(port, env_index=env_index, num_envs=num_envs, **kw)
 
 
-def make_vec_env(ports: list[int], asynchronous: bool = True, **kw) -> gym.vector.VectorEnv:
-    """One sub-env per server port. Async = one Python worker process per env (spawn)."""
+def make_vec_env(ports: list[int] | None = None, n: int | None = None, asynchronous: bool = True, **kw) -> gym.vector.VectorEnv:
+    """One sub-env per sim server. ports=[...]: use running servers. ports=None: n envs that each start and
+    recycle their own server (recommended; ports 8800+, cold start ~25-50 s). Async = one worker process per env."""
+    if ports is None:
+        if not n:
+            raise ValueError("give ports or n")
+        ports = [None] * n
     n = len(ports)
     fns = [functools.partial(make_env, p, i, n, **kw) for i, p in enumerate(ports)]
     if asynchronous:

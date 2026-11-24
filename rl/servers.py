@@ -149,6 +149,70 @@ class ServerPool:
         self.stop()
 
 
+def find_free_port(start: int, stop: int) -> int:
+    for p in range(start, stop):
+        if p not in RESERVED_PORTS and port_free(p):
+            return p
+    raise RuntimeError(f"no free port in {start}..{stop - 1}")
+
+
+class RecyclingServer:
+    """A sim server owned by one env that is replaced every `recycle_every` episodes.
+
+    A long-lived sim server slows down run after run (measured on BOREN-0: ~115 decisions/s fresh, ~57 after
+    ~40 runs, ~15 after ~140; decisions stay identical). So the owning env starts a spare server in the
+    background once the current one has served `recycle_every` episodes, and switches to it at the first
+    reset after it is ready; the old one is shut down in the background. Ports come from a private range
+    [port_lo, port_lo + 50).
+    """
+
+    def __init__(self, port_lo: int, recycle_every: int = 40, verbose: bool = False):
+        self.port_lo, self.recycle_every, self.verbose = port_lo, recycle_every, verbose
+        self.cur = SimServer(find_free_port(port_lo, port_lo + 50), verbose)
+        self.cur.wait_ready()
+        self.spare: SimServer | None = None
+        self.episodes = 0
+        self.recycles = 0
+
+    @property
+    def port(self) -> int:
+        return self.cur.port
+
+    def on_reset(self) -> bool:
+        """Call before each reset. Returns True if the env must reconnect (server switched)."""
+        self.episodes += 1
+        if not self.recycle_every or self.episodes <= self.recycle_every:
+            return False
+        if self.spare is None:
+            self.spare = SimServer(find_free_port(self.port_lo, self.port_lo + 50), self.verbose)
+            return False
+        if not self.spare.ready.is_set():
+            return False
+        if self.spare.exited:  # failed to start; try again later
+            self.spare = None
+            return False
+        old, self.cur, self.spare = self.cur, self.spare, None
+        threading.Thread(target=old.stop, daemon=True).start()
+        self.episodes, self.recycles = 1, self.recycles + 1
+        return True
+
+    def stop(self) -> None:
+        for s in (self.spare, self.cur):
+            if s is not None:
+                s.stop()
+        self.spare = None
+
+
+def parse_ports(ports: str | None) -> list[int] | None:
+    if not ports:
+        return None
+    ps = [int(p) for p in ports.split(",") if p.strip()]
+    bad = [p for p in ps if p in RESERVED_PORTS]
+    if bad:
+        raise SystemExit(f"refusing reserved Play.bat port(s) {bad}")
+    return ps
+
+
 def servers_or_ports(n: int, ports: str | None, base_port: int = DEFAULT_BASE_PORT):
     """Use already-running servers (`--ports 8800,8801`) or start n new ones. Returns (ports, pool|None)."""
     if ports:

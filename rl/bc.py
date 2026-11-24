@@ -86,7 +86,8 @@ def main():
     ap.add_argument("--eval-episodes", type=int, default=20)
     ap.add_argument("--seed-base", type=int, default=9000)
     ap.add_argument("--servers", type=int, default=6)
-    ap.add_argument("--ports")
+    ap.add_argument("--ports", help="use running servers (python -m rl.servers) instead of starting own ones")
+    ap.add_argument("--recycle-every", type=int, default=40, help="replace each own sim server after this many episodes (0 = never)")
     ap.add_argument("--max-episode-seconds", type=float, default=600, help="eval: cut an episode after this long")
     ap.add_argument("--out")
     a = ap.parse_args()
@@ -104,11 +105,13 @@ def main():
     if a.eval_episodes > 0:
         from .env import make_vec_env
         from .evaluate import evaluate, fmt, model_policy, random_policy
-        from .servers import servers_or_ports
-
-        ports, pool = servers_or_ports(a.servers, a.ports)
+        
+        from .servers import parse_ports
+        ports, pool = parse_ports(a.ports), None
+        if ports is None:
+            print(f"[sim] starting {a.servers} sim servers (own, recycled every {a.recycle_every} episodes; cold start ~25-60 s)", flush=True)
         try:
-            vec = make_vec_env(ports, max_episode_seconds=a.max_episode_seconds)
+            vec = make_vec_env(ports, n=a.servers, recycle_every=a.recycle_every, max_episode_seconds=a.max_episode_seconds)
             torch.manual_seed(a.seed_base)
             try:
                 res = {}
