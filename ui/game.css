@@ -104,3 +104,6 @@ td, th { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: lef
 th { color: var(--muted); font-weight: 500; }
 .review { max-height: 60vh; overflow: auto; font-size: 12px; }
 .err { color: #ef5b5b; }
+/* Tera button left of the command window (live: button_tera tinted with the tera type) */
+.tera-btn { width: 24px; height: 22px; cursor: pointer; border-radius: 6px; background: radial-gradient(circle at 40% 35%, #fff 0, #f8c8f8 25%, #a868e8 60%, #504080 100%); box-shadow: 0 0 0 1px #302848; }
+.tera-btn.sel { box-shadow: 0 0 0 1px #fff, 0 0 6px 2px #f8a8f8; }

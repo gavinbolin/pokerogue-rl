@@ -577,7 +577,7 @@ class CommandScreen extends Screen {
     this.cols = 2;
     const has = pre => d.actions.some(a => a.id === pre || a.id.startsWith(`${pre}:`));
     const run = findAction(d, "run");
-    const known = /^(move|struggle|ball|switch|run)(:|$)/;
+    const known = /^(move|struggle|ball|switch|run|tera)(:|$)/;
     const other = d.actions.map((a, i) => ({ a, i })).filter(x => !known.test(x.a.id));
     this.items = [
       { label: "Fight", enabled: has("move") || has("struggle"), act: () => (has("move") ? push(new FightScreen(d)) : choose(findAction(d, "struggle"))) },
@@ -588,6 +588,27 @@ class CommandScreen extends Screen {
     if (other.length) {
       this.items.push({ label: "Other", enabled: true, act: () => push(new ListScreen(d, other.map(x => x.i), "Other actions", true)) });
     }
+    // Tera button (live: left of the command window once you hold a Tera Orb; it opens the fight menu in Tera mode)
+    this.teraIdx = -1;
+    if (has("tera")) {
+      this.teraIdx = this.items.length;
+      const only = d.actions.every(a => !a.id.startsWith("tera:") || a.id === "tera:struggle");
+      this.items.push({ label: "Tera", tera: true, enabled: true, act: () => (only ? choose(findAction(d, "tera:struggle")) : push(new FightScreen(d, true))) });
+    }
+  }
+  nav(dx, dy) {
+    // as in CommandUiHandler: LEFT from Fight / Pokémon goes to Tera, RIGHT from Tera back to Fight
+    if (this.teraIdx >= 0 && dx < 0 && (this.cursor === 0 || this.cursor === 2)) {
+      this.cursor = this.teraIdx;
+      return;
+    }
+    if (this.cursor === this.teraIdx) {
+      if (dx > 0) {
+        this.cursor = 0;
+      }
+      return;
+    }
+    super.nav(dx, dy);
   }
   render() {
     const pos = [
@@ -598,11 +619,18 @@ class CommandScreen extends Screen {
       [228, 125],
     ];
     const mon = this.d.context?.mon ?? "it";
+    const tt = this.d.context?.teraType;
     return (
-      msgBox(`What will ${mon} do?`, 196) +
+      msgBox(`What will ${mon} do?`, this.teraIdx >= 0 ? 170 : 196) +
       win(214, 132, 106, 48) +
-      this.items.map((it, i) => `<div class="txt item ${it.enabled === false ? "disabled" : ""}" data-i="${i}" style="left:${pos[i][0]}px;top:${pos[i][1]}px">${esc(it.label)}</div>`).join("") +
-      cursorAt(pos[this.cursor][0] - 8, pos[this.cursor][1] + 1)
+      this.items
+        .map((it, i) =>
+          it.tera
+            ? `<div class="tera-btn item ${this.cursor === i ? "sel" : ""}" data-i="${i}" style="left:186px;top:142px" title="Terastallize (${esc(titleCase(tt ?? ""))})"><span class="typeico" style="position:absolute;left:-2px;top:6px;${typeCss(tt ?? "")}"></span></div>`
+            : `<div class="txt item ${it.enabled === false ? "disabled" : ""}" data-i="${i}" style="left:${pos[i][0]}px;top:${pos[i][1]}px">${esc(it.label)}</div>`,
+        )
+        .join("") +
+      (this.cursor === this.teraIdx ? cursorAt(178, 149) : cursorAt(pos[this.cursor][0] - 8, pos[this.cursor][1] + 1))
     );
   }
 }
@@ -611,16 +639,19 @@ const effColor = e => (e == null ? null : e === 0 ? "#888888" : e < 1 ? "#f89058
 const effText = e => (e == null ? "" : e === 0 ? "No effect" : `x${e}`);
 
 class FightScreen extends Screen {
-  constructor(d) {
+  /** tera: the fight menu opened from the Tera button (moves send tera:i) */
+  constructor(d, tera = false) {
     super();
     this.d = d;
+    this.tera = tera;
     this.cols = 2;
     this.back = true;
     const slot = d.context?.slot ?? 0;
     this.mon = shown?.obs?.party?.[slot] ?? d.obs?.party?.[slot];
     const moves = this.mon?.moves ?? [];
+    const pre = tera ? "tera" : "move";
     this.items = [0, 1, 2, 3].map(i => {
-      const idx = findAction(d, `move:${i}`);
+      const idx = findAction(d, `${pre}:${i}`);
       return { label: moves[i]?.name ?? "-", move: moves[i], actionId: `move:${i}`, enabled: idx >= 0, act: () => this.pickMove(idx) };
     });
   }
@@ -649,6 +680,7 @@ class FightScreen extends Screen {
     }
     return (
       `<div class="msgbox"></div>` +
+      (this.tera ? `<div class="txt smalltxt" style="left:10px;top:132px;color:#f8a8f8!important">Terastallize → ${esc(titleCase(this.d.context?.teraType ?? ""))}</div>` : "") +
       win(226, 132, 94, 48) +
       this.items
         .map((it, i) => {
@@ -733,6 +765,7 @@ const PARTY_PROMPTS = {
   REVIVAL_BLESSING: "Revive which Pokémon?",
   SPLICE: "Splice which Pokémon?",
   MODIFIER_TRANSFER: "Choose a Pokémon. (Transfer)",
+  DISCARD: "Choose a Pokémon. (Discard)",
 };
 
 class PartyScreen extends Screen {
@@ -772,6 +805,9 @@ class PartyScreen extends Screen {
     const cancelIdx = o.cancelId ? findAction(d, o.cancelId) : -1;
     if (leftovers.length) {
       this.items.push({ label: "More…", act: () => push(new ListScreen(d, leftovers, "Other choices", true)) });
+    }
+    if (o.toggle && o.toggle.idx >= 0) {
+      this.items.push({ label: o.toggle.label, toggle: true, act: () => choose(o.toggle.idx) });
     }
     this.cancelItem = this.items.length;
     this.items.push({ label: o.cancelLabel ?? "Cancel", enabled: cancelIdx >= 0 || o.back === true, act: () => (cancelIdx >= 0 ? choose(cancelIdx) : pop()) });
@@ -838,7 +874,9 @@ class PartyScreen extends Screen {
       const it = this.items[i];
       const isCancel = i === this.cancelItem;
       const sel = this.cursor === i;
-      if (isCancel) {
+      if (it.toggle) {
+        html.push(`<div class="pcancel item" data-i="${i}" style="left:204px;top:158px;width:56px;background-position:0 -${sel ? 16 : 0}px"><div class="txt" style="left:8px;top:3px">${esc(it.label)}</div></div>`);
+      } else if (isCancel) {
         const label = it.label.length > 8 ? it.label.slice(0, 18) : it.label;
         const wide = label.length > 8;
         html.push(`<div class="pcancel item ${it.enabled === false ? "disabled" : ""}" data-i="${i}" style="left:${wide ? 226 : 262}px;top:158px;width:${wide ? 88 : 52}px;background-position:0 -${sel ? 16 : 0}px;background-size:${wide ? "88px 32px" : "auto"}"><div class="txt" style="left:16px;top:3px">${esc(label)}</div></div>`);
@@ -858,7 +896,9 @@ class PartyScreen extends Screen {
         <div style="left:0;top:50px">${(p.stats || []).map((v, i) => `${["HP", "At", "Df", "SA", "SD", "Sp"][i]}${v}`).join(" ")}</div></div>`);
     }
     const prompt = this.o.prompt ?? PARTY_PROMPTS[this.d.sub] ?? this.d.prompt ?? "Choose a Pokémon.";
-    html.push(`<div class="txt" style="left:8px;top:161px;width:190px;overflow:hidden">${esc(prompt)}</div>`);
+    // long prompts ("Are you sure you want to discard these items?") wrap onto two lines like the game's text box
+    const long = prompt.length > 30;
+    html.push(`<div class="txt${long ? " smalltxt" : ""}" style="left:8px;top:${long ? 155 : 161}px;width:190px;overflow:hidden;white-space:normal;${long ? "line-height:10px!important" : ""}">${esc(prompt)}</div>`);
     queueMicrotask(async () => {
       for (const [s, icon] of icons) {
         const holder = document.getElementById(`picon-${s}`);
@@ -984,7 +1024,7 @@ function transferScreen(d) {
   const stage = d.context?.stage;
   const ids = pre => d.actions.map((a, i) => (a.id.startsWith(pre) ? i : -1)).filter(i => i >= 0);
   if (stage === "from") {
-    return new PartyScreen(d, { filter: a => a.id.startsWith("xfer_from:"), cancelId: "cancel", cancelLabel: "Done", prompt: d.prompt });
+    return new PartyScreen(d, { filter: a => a.id.startsWith("xfer_from:"), cancelId: "cancel", cancelLabel: "Done", prompt: d.prompt, toggle: { label: "Discard", idx: findAction(d, "xfer_mode") } });
   }
   if (stage === "item") {
     return new TransferListScreen(d, ids("xfer_item:"), d.prompt);
@@ -996,6 +1036,24 @@ function transferScreen(d) {
   const it = d.context?.item === "all" ? "all items" : items[d.context?.item]?.name ?? "the item";
   const qty = d.context?.qty ? ` x${d.context.qty}` : "";
   const s = new PartyScreen(d, { filter: a => a.id.startsWith("xfer_to:"), cancelId: "back", cancelLabel: "Back", prompt: `Give ${it}${qty} to?` });
+  return s;
+}
+/** Manage Items in Discard mode: mon -> item / All -> quantity -> "Are you sure?" Yes / No. */
+function discardScreen(d) {
+  const stage = d.context?.stage;
+  const ids = pre => d.actions.map((a, i) => (a.id.startsWith(pre) ? i : -1)).filter(i => i >= 0);
+  if (stage === "from") {
+    return new PartyScreen(d, { filter: a => a.id.startsWith("discard_from:"), cancelId: "cancel", cancelLabel: "Done", prompt: d.prompt, toggle: { label: "Transfer", idx: findAction(d, "xfer_mode") } });
+  }
+  if (stage === "item") {
+    return new TransferListScreen(d, ids("discard_item:"), d.prompt);
+  }
+  if (stage === "qty") {
+    return new TransferListScreen(d, ids("discard_qty:"), d.prompt);
+  }
+  const s = new TransferListScreen(d, [findAction(d, "discard_yes"), findAction(d, "discard_no")].filter(i => i >= 0), d.prompt);
+  const no = findAction(d, "discard_no");
+  s.back = () => choose(no);
   return s;
 }
 const TYPES = ["NORMAL", "FIGHTING", "FLYING", "POISON", "GROUND", "ROCK", "BUG", "GHOST", "STEEL", "FIRE", "WATER", "GRASS", "ELECTRIC", "PSYCHIC", "ICE", "DRAGON", "DARK", "FAIRY", "STELLAR"];
@@ -1023,6 +1081,12 @@ class RewardScreen extends Screen {
     this.cursor = this.items.indexOf(this.rows[this.row]?.[this.col]);
   }
   nav(dx, dy) {
+    // the bottom-right window (Reroll / Skip / Manage Items / Lock Rarities) is a vertical list
+    if (dy && this.row === 2 && this.col + dy >= 0 && this.col + dy < this.rows[2].length) {
+      this.col += dy;
+      this.sync();
+      return;
+    }
     if (dy) {
       let r = this.row;
       for (let k = 0; k < 3; k++) {
@@ -1031,8 +1095,8 @@ class RewardScreen extends Screen {
           break;
         }
       }
+      this.col = r === 2 ? (dy > 0 ? 0 : this.rows[2].length - 1) : Math.min(this.row === 2 ? 0 : this.col, this.rows[r].length - 1);
       this.row = r;
-      this.col = Math.min(this.col, this.rows[r].length - 1);
     } else if (dx) {
       const n = this.rows[this.row].length;
       this.col = (this.col + dx + n) % n;
@@ -1075,15 +1139,22 @@ class RewardScreen extends Screen {
     }
     // bottom: description + reroll / skip window
     const cur = this.items[this.cursor];
-    const desc = cur?.a?.data?.desc ?? (cur?.a?.id === "reroll" ? "Roll new rewards." : cur?.a?.id === "skip" ? "Take nothing this wave." : cur?.a?.id === "transfer" ? "Manage Pokémon held items (Transfer)." : "");
+    const desc = cur?.a?.data?.desc ?? (cur?.a?.id === "reroll" ? "Roll new rewards." : cur?.a?.id === "skip" ? "Take nothing this wave." : cur?.a?.id === "transfer" ? "Manage Pokémon held items (Transfer/Discard)." : "");
     html.push(`<div class="msgbox"></div><div class="txt msgtext smalltxt" style="width:186px;line-height:10px!important;top:140px">${esc(desc)}</div>`);
-    html.push(win(206, 132, 114, 48));
+    // Reroll / Skip / Manage Items / Lock Rarities (the window grows with the buttons the game shows)
+    const n = this.rows[2].length;
+    const step = n > 3 ? 11 : 14;
+    const wy = Math.min(132, 180 - (n * step + 9));
+    const ty = n > 3 ? 5 : 8;
+    html.push(win(206, wy, 114, 180 - wy));
+    const locked = resp?.decision?.context?.lockRarities;
     this.rows[2].forEach((it, k) => {
       const i = this.items.indexOf(it);
       const sel = i === this.cursor;
-      html.push(`<div class="txt item" data-i="${i}" style="left:222px;top:${140 + k * 14}px">${esc(it.a.id === "reroll" ? `Reroll ₽${it.a.data?.cost ?? ""}` : it.label)}</div>`);
+      const label = it.a.id === "reroll" ? `Reroll ₽${it.a.data?.cost ?? ""}${locked ? " (lock)" : ""}` : it.label;
+      html.push(`<div class="txt item" data-i="${i}" style="left:222px;top:${wy + ty + k * step}px">${esc(label)}</div>`);
       if (sel) {
-        html.push(cursorAt(213, 141 + k * 14));
+        html.push(cursorAt(213, wy + ty + 1 + k * step));
       }
     });
     if (resp?.decision?.obs) {
@@ -1121,6 +1192,9 @@ function rootScreen(d) {
     case "target":
       return new TargetScreen(d);
     case "party":
+      if (d.sub === "DISCARD" && d.context?.stage) {
+        return discardScreen(d);
+      }
       if (d.sub === "MODIFIER_TRANSFER" && d.context?.stage) {
         return transferScreen(d);
       }
