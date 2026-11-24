@@ -732,6 +732,7 @@ const PARTY_PROMPTS = {
   RELEASE: "Release which Pokémon?",
   REVIVAL_BLESSING: "Revive which Pokémon?",
   SPLICE: "Splice which Pokémon?",
+  MODIFIER_TRANSFER: "Choose a Pokémon. (Transfer)",
 };
 
 class PartyScreen extends Screen {
@@ -895,7 +896,7 @@ class ListScreen extends Screen {
     const y = Math.max(0, 132 - h);
     const hy = this.header ? 14 : 0;
     return (
-      msgBox(this.title, Math.min(296, x - 16 > 120 ? x - 16 : 296)) +
+      (this.noMsg ? "" : msgBox(this.title, Math.min(296, x - 16 > 120 ? x - 16 : 296))) +
       win(x, y, width, h) +
       (this.header ? `<div class="txt smalltxt" style="left:${x + 10}px;top:${y + 8}px">${this.header}</div>` : "") +
       vis
@@ -911,6 +912,20 @@ class ListScreen extends Screen {
   }
 }
 
+/** A list of hand-made entries [{label, act}] (not 1:1 with actions); `back` runs on X / Esc. */
+function menuScreen(d, title, entries, back = null, header = "") {
+  const s = new ListScreen(d, [], title, false, a => a.label, header);
+  s.items = entries;
+  s.back = back;
+  return s;
+}
+
+/**
+ * Learning a 5th move, the way the game asks it:
+ *   "Should a move be forgotten and replaced with X?"  Yes -> pick the move to forget (X/Cancel = don't learn)
+ *                                                      No  -> don't learn
+ *   then (live setting, on by default) "Stop trying to teach X?"  Yes -> give up, No -> ask again.
+ */
 function learnMoveScreen(d) {
   const c = d.context || {};
   const header = c.move ? `New: ${esc(c.move)} · ${esc(c.type != null ? titleCase(typeName(c.type)) : "")} · Pow ${c.power > 0 ? c.power : "-"} · Acc ${c.accuracy > 0 ? c.accuracy : "-"}` : "";
@@ -918,9 +933,70 @@ function learnMoveScreen(d) {
   const label = a => {
     const m = a.id.match(/^forget:(\d+)/);
     const mv = m && mon?.moves?.[Number(m[1])];
-    return mv ? `${a.label}  (${titleCase(mv.type)} ${mv.power > 0 ? mv.power : "-"})` : a.label;
+    return mv ? `${a.label.replace(/^Forget /, "")}  (${titleCase(mv.type)} ${mv.power > 0 ? mv.power : "-"})` : a.label;
   };
-  return new ListScreen(d, d.actions.map((_, i) => i), d.prompt ?? "Forget a move?", false, label, header);
+  const keep = findAction(d, "keep");
+  const forgets = d.actions.map((a, i) => (a.id.startsWith("forget:") ? i : -1)).filter(i => i >= 0);
+  if (d.sub === "stop_teaching") {
+    const stop = findAction(d, "stop");
+    const retry = findAction(d, "retry");
+    return menuScreen(d, d.prompt ?? "Stop trying to teach it?", [
+      { label: "Yes", act: () => choose(stop) },
+      { label: "No", act: () => choose(retry) },
+    ], () => choose(retry));
+  }
+  const moveList = () => {
+    const s = new ListScreen(d, forgets, "Which move should be forgotten?", false, label, header);
+    if (keep >= 0) {
+      s.items.push({ label: `Don't learn ${c.move ?? ""}`.trim(), act: () => choose(keep) });
+      s.back = () => choose(keep);
+    }
+    return s;
+  };
+  if (d.kind === "forget_move" || keep < 0) {
+    return moveList();
+  }
+  return menuScreen(d, `Should a move be forgotten and replaced with ${c.move ?? "it"}?`, [
+    { label: "Yes", act: () => push(moveList()) },
+    { label: "No", act: () => choose(keep) },
+  ], () => choose(keep));
+}
+
+/** Transfer screen stages after the source mon: item list / quantity over the party screen. */
+class TransferListScreen extends ListScreen {
+  constructor(d, idxs, title, labelFn = a => a.label) {
+    super(d, idxs, title, false, labelFn, "");
+    this.noMsg = true;
+    this.party = new PartyScreen(d, { filter: () => false, prompt: title, back: true, cancelLabel: "Back" });
+    this.party.cursor = d.context?.from ?? 0;
+    const backIdx = findAction(d, "back");
+    if (backIdx >= 0) {
+      this.items.push({ label: "Back", act: () => choose(backIdx) });
+      this.back = () => choose(backIdx);
+    }
+  }
+  render() {
+    return this.party.render() + super.render();
+  }
+}
+
+function transferScreen(d) {
+  const stage = d.context?.stage;
+  const ids = pre => d.actions.map((a, i) => (a.id.startsWith(pre) ? i : -1)).filter(i => i >= 0);
+  if (stage === "from") {
+    return new PartyScreen(d, { filter: a => a.id.startsWith("xfer_from:"), cancelId: "cancel", cancelLabel: "Done", prompt: d.prompt });
+  }
+  if (stage === "item") {
+    return new TransferListScreen(d, ids("xfer_item:"), d.prompt);
+  }
+  if (stage === "qty") {
+    return new TransferListScreen(d, ids("xfer_qty:"), d.prompt);
+  }
+  const items = d.context?.items ?? [];
+  const it = d.context?.item === "all" ? "all items" : items[d.context?.item]?.name ?? "the item";
+  const qty = d.context?.qty ? ` x${d.context.qty}` : "";
+  const s = new PartyScreen(d, { filter: a => a.id.startsWith("xfer_to:"), cancelId: "back", cancelLabel: "Back", prompt: `Give ${it}${qty} to?` });
+  return s;
 }
 const TYPES = ["NORMAL", "FIGHTING", "FLYING", "POISON", "GROUND", "ROCK", "BUG", "GHOST", "STEEL", "FIRE", "WATER", "GRASS", "ELECTRIC", "PSYCHIC", "ICE", "DRAGON", "DARK", "FAIRY", "STELLAR"];
 const typeName = t => (typeof t === "number" ? (TYPES[t] ?? "UNKNOWN") : String(t));
@@ -999,7 +1075,7 @@ class RewardScreen extends Screen {
     }
     // bottom: description + reroll / skip window
     const cur = this.items[this.cursor];
-    const desc = cur?.a?.data?.desc ?? (cur?.a?.id === "reroll" ? "Roll new rewards." : cur?.a?.id === "skip" ? "Take nothing this wave." : "");
+    const desc = cur?.a?.data?.desc ?? (cur?.a?.id === "reroll" ? "Roll new rewards." : cur?.a?.id === "skip" ? "Take nothing this wave." : cur?.a?.id === "transfer" ? "Manage Pokémon held items (Transfer)." : "");
     html.push(`<div class="msgbox"></div><div class="txt msgtext smalltxt" style="width:186px;line-height:10px!important;top:140px">${esc(desc)}</div>`);
     html.push(win(206, 132, 114, 48));
     this.rows[2].forEach((it, k) => {
@@ -1045,6 +1121,9 @@ function rootScreen(d) {
     case "target":
       return new TargetScreen(d);
     case "party":
+      if (d.sub === "MODIFIER_TRANSFER" && d.context?.stage) {
+        return transferScreen(d);
+      }
       return new PartyScreen(d, { cancelId: "cancel" });
     case "catch_full":
       return new PartyScreen(d, {
