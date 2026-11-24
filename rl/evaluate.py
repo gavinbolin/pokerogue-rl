@@ -16,13 +16,23 @@ from .env import make_vec_env
 from .policy import random_actions
 
 
-def evaluate(vec, policy_fn, episodes: int, seed: int, max_seconds: float = 1800.0) -> dict:
-    """policy_fn(obs_batch, mask_batch) -> actions. Plays seeds seed..seed+episodes-1 once each."""
+def evaluate(vec, policy_fn, episodes: int, seed: int, max_seconds: float = 1800.0, progress_s: float = 60.0) -> dict:
+    """policy_fn(obs_batch, mask_batch) -> actions. Plays seeds seed..seed+episodes-1 once each.
+
+    Episodes count when they end (wipe) or are truncated (sim turn/decision limits, max_waves, or the env's
+    max_decisions / max_episode_seconds); the truncation cause is in `ends`. Prints the still-running seeds
+    every `progress_s` seconds so a stuck or very long episode is visible.
+    """
     obs, info = vec.reset(seed=seed)
     want = set(range(seed, seed + episodes))
     results = {}
-    steps, t0 = 0, time.time()
+    steps, t0, last = 0, time.time(), time.time()
     while want - results.keys():
+        if time.time() - last > progress_s:
+            last = time.time()
+            live = [f"{int(info['seed'][i])}:w{int(info['wave'][i])}/d{int(info['decisions'][i])}" for i in range(len(info["seed"]))
+                    if int(info["seed"][i]) in want - results.keys()]
+            print(f"[eval] {len(results)}/{episodes} done after {last - t0:.0f} s; running {live}", flush=True)
         acts = policy_fn(obs["obs"], obs["action_mask"])
         obs, rew, term, trunc, info = vec.step(acts)
         steps += len(acts)
@@ -69,16 +79,18 @@ def main():
     ap.add_argument("--servers", type=int, default=6)
     ap.add_argument("--ports")
     ap.add_argument("--max-waves", type=int)
+    ap.add_argument("--max-episode-seconds", type=float, default=600)
     a = ap.parse_args()
     ports, pool = servers_or_ports(a.servers, a.ports)
     try:
-        vec = make_vec_env(ports, max_waves=a.max_waves)
+        vec = make_vec_env(ports, max_waves=a.max_waves, max_episode_seconds=a.max_episode_seconds)
         try:
             if a.model:
                 import torch
 
                 from .policy import load
                 dev = "cuda" if torch.cuda.is_available() else "cpu"
+                torch.manual_seed(a.seed_base)
                 r = evaluate(vec, model_policy(load(a.model, dev), greedy=not a.sample), a.episodes, a.seed_base)
                 print(fmt("model", r))
             if a.random or not a.model:

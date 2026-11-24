@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import random
+import time
 from dataclasses import asdict, dataclass
 
 import gymnasium as gym
@@ -56,13 +57,14 @@ class PokeRogueEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, port: int, env_index: int = 0, num_envs: int = 1, base_seed: int = 0, reward=None,
-                 max_waves: int | None = None, max_decisions: int = 20000, team=None,
+                 max_waves: int | None = None, max_decisions: int = 20000, max_episode_seconds: float | None = None, team=None,
                  invalid_action: str = "raise", connect_retry_s: float = 30.0):
         self.port, self.env_index, self.num_envs = port, env_index, num_envs
         self.base = base_seed + env_index
         self.episode = 0
         self.reward_cfg = RewardConfig.from_any(reward)
         self.max_waves, self.max_decisions, self.team = max_waves, max_decisions, team
+        self.max_episode_seconds = max_episode_seconds
         self.invalid_action = invalid_action
         self.client = SimClient(port, connect_retry_s=connect_retry_s)
         self.mapper = ActionMapper()
@@ -86,7 +88,8 @@ class PokeRogueEnv(gym.Env):
         return {"obs": np.zeros(OBS_DIM, dtype=np.float32), "action_mask": m}
 
     def _info(self, extra=None):
-        info = {"seed": self.sim_seed, "wave": self.wave, "waves_cleared": self.cleared, "decisions": self.decisions}
+        info = {"seed": self.sim_seed, "wave": self.wave, "waves_cleared": self.cleared, "decisions": self.decisions,
+                "seconds": time.time() - self.t_start}
         if extra:
             info.update(extra)
         return info
@@ -100,6 +103,7 @@ class PokeRogueEnv(gym.Env):
         self.episode += 1
         r = self.client.reset(seed=self.sim_seed, team=self.team, max_waves=self.max_waves)
         self.decisions = 0
+        self.t_start = time.time()
         if "decision" not in r:  # ended before any decision (shouldn't happen)
             raise RuntimeError(f"seed {self.sim_seed}: run ended at reset: {r.get('end')}")
         d = r["decision"]
@@ -143,10 +147,14 @@ class PokeRogueEnv(gym.Env):
         if cfg.hp_delta:
             rew += cfg.hp_delta * (hp - self.hp)
         self.hp = hp
-        truncated = self.decisions >= self.max_decisions
         info = self._info({"kind": d.get("kind")})
+        truncated = False
+        if self.decisions >= self.max_decisions:
+            truncated, info["end"] = True, f"py_decision_limit:{self.max_decisions}"
+        elif self.max_episode_seconds and time.time() - self.t_start > self.max_episode_seconds:
+            truncated, info["end"] = True, f"py_time_limit:{self.max_episode_seconds:g}s"
         if truncated:
-            info["end"] = f"py_decision_limit:{self.max_decisions}"
+            rew += cfg.truncation_value
             try:
                 self.client.call("abandon")
             except Exception:

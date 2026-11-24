@@ -87,6 +87,7 @@ def main():
     ap.add_argument("--seed-base", type=int, default=9000)
     ap.add_argument("--servers", type=int, default=6)
     ap.add_argument("--ports")
+    ap.add_argument("--max-episode-seconds", type=float, default=600, help="eval: cut an episode after this long")
     ap.add_argument("--out")
     a = ap.parse_args()
 
@@ -107,7 +108,8 @@ def main():
 
         ports, pool = servers_or_ports(a.servers, a.ports)
         try:
-            vec = make_vec_env(ports)
+            vec = make_vec_env(ports, max_episode_seconds=a.max_episode_seconds)
+            torch.manual_seed(a.seed_base)
             try:
                 res = {}
                 for name, fn in [("bc greedy", model_policy(model, greedy=True)),
