@@ -179,6 +179,8 @@ def main():
     ap.add_argument("--exp-step-cap", type=float, default=1.5)
     ap.add_argument("--win-bonus", type=float, default=0.5, help="per foe when a battle ends without fleeing")
     ap.add_argument("--catch-bonus", type=float, default=0.0, help="when a battle ends with a catch (no KO bonus then)")
+    ap.add_argument("--fled-wave-scale", type=float, default=1.0, help="x wave/boss reward for a wave left by fleeing")
+    ap.add_argument("--caught-wave-scale", type=float, default=1.0, help="x wave/boss reward for a wave ended by a catch")
     ap.add_argument("--hp-keep", type=float, default=0.5, help="x party HP kept over a won battle (end/start, <= 1)")
     ap.add_argument("--faint-penalty", type=float, default=0.3, help="per own mon that faints")
     ap.add_argument("--wipe-penalty", type=float, default=0.0)
@@ -234,7 +236,8 @@ def main():
     reward = RewardConfig(per_wave=a.per_wave, boss_bonus=a.boss_bonus, wipe_penalty=a.wipe_penalty, hp_delta=a.hp_delta,
                           step_cost=a.step_cost, limit_penalty=a.limit_penalty, major_boss_bonus=a.major_boss_bonus,
                           exp_per_level=a.exp_per_level, exp_step_cap=a.exp_step_cap, win_bonus=a.win_bonus, hp_keep=a.hp_keep,
-                          faint_penalty=a.faint_penalty, catch_bonus=a.catch_bonus)
+                          faint_penalty=a.faint_penalty, catch_bonus=a.catch_bonus,
+                          fled_wave_scale=a.fled_wave_scale, caught_wave_scale=a.caught_wave_scale)
     args = vars(a) | {"reward": asdict(reward), "device": str(device), "run_dir": str(run_dir), "model_dir": str(model_dir)}
 
     model = build_model(a.hidden, a.layers, device)

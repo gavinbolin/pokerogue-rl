@@ -45,6 +45,8 @@ class RewardConfig:
     exp_step_cap: float = 1.0  # cap on the level reward in one step
     win_bonus: float = 0.0  # per foe, when a battle ends by KO (not fled, not caught)
     catch_bonus: float = 0.0  # when a battle ends with a catch
+    fled_wave_scale: float = 1.0  # x per_wave / boss terms for a wave left by fleeing (1 = waves count the same)
+    caught_wave_scale: float = 1.0  # x per_wave / boss terms for a wave ended by a catch
     hp_keep: float = 0.0  # x (party HP fraction at battle end / at battle start, clipped to [0, 1]); won battles only
     faint_penalty: float = 0.0  # per own mon that newly faints (any battle, fled or not)
 
@@ -168,6 +170,7 @@ class PokeRogueEnv(gym.Env):
         self._levels, self._fainted = party_levels(o), party_fainted(o)
         self._battle_start_hp, self._battle_open, self._last_cmd = self.hp, d.get("kind") != "reward", None
         self._foes = len(o.get("enemies") or [])
+        self._outcome_scale = 1.0
         self._fresh = (self._observe(d), self._info({"kind": d.get("kind")}))
         return self._fresh
 
@@ -216,7 +219,7 @@ class PokeRogueEnv(gym.Env):
         o = d.get("obs") or {}
         wave = d.get("wave") or self.wave
         cleared = max(self.cleared, wave - 1)
-        self._wave_reward(self.cleared, cleared, comp)
+        prev_cleared = self.cleared
         new_wave = wave != self.wave
         self.wave_decisions = 0 if new_wave else self.wave_decisions + 1
         self.cleared, self.wave = cleared, wave
@@ -234,16 +237,21 @@ class PokeRogueEnv(gym.Env):
         if self._battle_open and (d.get("kind") == "reward" or new_wave):
             if self._last_cmd == RUN_SLOT:
                 self.cnt["fled"] += 1
+                self._outcome_scale = cfg.fled_wave_scale
             elif self._last_cmd in BALL_SLOTS:  # ended by a catch: no KO bonus (else catching becomes the new shortcut)
                 self.cnt["caught"] += 1
                 comp["win"] += cfg.catch_bonus
+                self._outcome_scale = cfg.caught_wave_scale
             else:
+                self._outcome_scale = 1.0
                 self.cnt["won"] += 1
                 comp["win"] += cfg.win_bonus * max(self._foes, 1)
                 if cfg.hp_keep and self._battle_start_hp > 0:
                     comp["hp_keep"] += cfg.hp_keep * min(max(hp / self._battle_start_hp, 0.0), 1.0)
             self._battle_open = False
+        self._wave_reward(prev_cleared, cleared, comp, self._outcome_scale)
         if new_wave:  # next battle starts
+            self._outcome_scale = 1.0
             self._battle_open, self._battle_start_hp, self._last_cmd = True, hp, None
             self._foes = len(o.get("enemies") or [])
         elif self._battle_open:
@@ -279,13 +287,13 @@ class PokeRogueEnv(gym.Env):
         info.update({f"n_{k}": v for k, v in self.cnt.items()})
         return info
 
-    def _wave_reward(self, old: int, new: int, comp: dict) -> None:
+    def _wave_reward(self, old: int, new: int, comp: dict, scale: float = 1.0) -> None:
         if new <= old:
             return
         cfg = self.reward_cfg
-        comp["wave"] += cfg.per_wave * (new - old)
-        comp["boss"] += cfg.boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 10 == 0)
-        comp["boss"] += cfg.major_boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 50 == 0)
+        comp["wave"] += scale * cfg.per_wave * (new - old)
+        comp["boss"] += scale * cfg.boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 10 == 0)
+        comp["boss"] += scale * cfg.major_boss_bonus * sum(1 for w in range(old + 1, new + 1) if w % 50 == 0)
 
     def action_masks(self):  # sb3-contrib MaskablePPO convention
         return self._mask.astype(bool)
