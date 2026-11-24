@@ -414,10 +414,26 @@ Stop-Train.bat                                         # ask every running train
   loss and GAE. A wipe does not bootstrap; a run cut by a limit bootstraps with its last state's value.
 - **Defaults:** 6 envs × 256 steps = 1536 decisions per update, 4 epochs, minibatch 512, Adam lr 2.5e-4, γ 0.997,
   λ 0.95, clip 0.2, entropy 0.01, value 0.5, max grad norm 0.5, target KL 0.03.
-- **Reward (defaults here):** +1 per wave cleared, −0.001 per decision, −2 when a run is cut by a limit (sim turn /
-  decision / stall limits, the env's time cap, or `--max-wave-decisions 300`: more than 300 decisions in one wave,
-  i.e. a menu loop). All are flags (`--step-cost`, `--limit-penalty`, `--boss-bonus`, `--wipe-penalty`, `--hp-delta`).
-  `RewardConfig.limit_penalty` and the env's `max_wave_decisions` are new and default to off for other callers.
+- **Reward (defaults here, all flags):** `--per-wave 1` per wave cleared; `--boss-bonus 3` per boss wave (every 10th)
+  and `--major-boss-bonus 10` more per multiple of 50; `--exp-per-level 0.5` per party level gained (capped at
+  `--exp-step-cap 1.5` per step); `--win-bonus 0.5` per foe for a battle won by KO; `--hp-keep 0.5` × party HP kept
+  over that battle (end / start, ≤ 1); `--faint-penalty 0.3` per own faint; `--catch-bonus 0`; `--step-cost 0.001`;
+  `--limit-penalty 2` for a run cut by a limit (sim turn / decision / stall limits, the env's time cap, or
+  `--max-wave-decisions 300`, i.e. a menu loop). A battle counts as fled when the last battle command was Run, caught
+  when it was a ball, else won; fled and caught battles get only the +1 per wave, so fleeing is never the cheap way
+  to bank the HP / KO terms.
+  The first version (waves only) learned to flee ~67% of battle commands and throw balls ~30% (bosses get caught),
+  fighting 2%: mean 32 waves on 9000-9049 but a hard wall at wave 50. This shaping is the fix being tried.
+- **EXP:** the sim's observation has each mon's level but not its EXP bar (the live party summary shows it), so the
+  EXP term uses level-ups of mons already in the party as a proxy. Exposing EXP progress would need a sim change.
+- **Logs per episode:** `episodes.csv` has every reward component (`r_wave`, `r_boss`, `r_exp`, `r_win`, `r_hp_keep`,
+  `r_faint`, `r_step`, `r_limit`, ...) and counters (`n_cmd`, `n_run`, `n_fight`, `n_ball`, `n_switch`, `n_won`,
+  `n_fled`, `n_caught`, `n_levels`); `metrics.csv` / `train.log` show run% and fight% of battle commands per update;
+  `eval.csv` has `pass50` (held-out runs that cleared wave 50).
+- **After a reward change:** `--init <ckpt> --reset-value --value-warmup 5` starts from a model, resets its value head
+  and fits it for 5 updates with the policy frozen.
+- `python -m rl.action_stats <ckpt> 10` plays 10 held-out seeds on its own server (ports 9300+) and prints the picks
+  per decision kind and Run% / Fight% / Ball% / Switch% of battle commands.
 - **Seeds:** training plays seeds 110000+ (a new block of 10000 after every eval reset); evaluation uses the fixed
   held-out seeds 9000–9049, which training never sees.
 - **Eval:** at the start, random and the untrained policy on 9000–9049; then every `--eval-every 30` updates the
