@@ -1,0 +1,4 @@
+# Python side of pokerogue-rl (installed into .venv by scripts/setup_py.ps1).
+# torch comes from the CUDA 12.8 wheel index, see setup_py.ps1 (TORCH_SPEC / TORCH_INDEX).
+numpy>=2.0
+gymnasium>=1.2

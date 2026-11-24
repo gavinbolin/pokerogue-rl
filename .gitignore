@@ -4,3 +4,8 @@ node_modules
 # run logs (jsonl per run, summaries)
 runs/
 *.log
+
+# Python training env
+.venv/
+__pycache__/
+*.pyc
