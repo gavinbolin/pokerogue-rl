@@ -365,7 +365,7 @@ price vs money). Effectiveness uses the standard type chart on visible types, li
 
 **Rewards** are computed in Python (`RewardConfig`, pass `reward={...}` to the env): `per_wave` (1.0 per wave
 cleared), `boss_bonus` (extra per boss wave), `wipe_penalty`, `hp_delta` (× change in total party HP fraction),
-`step_cost`, `truncation_value`. A wipe is `terminated`; sim limits (turn limit, per-wave decision cap,
+`step_cost`, `truncation_value`, `limit_penalty` (subtracted when a run is cut by a limit other than `max_waves`); the env's `max_wave_decisions` cuts a run after that many decisions in one wave. A wipe is `terminated`; sim limits (turn limit, per-wave decision cap,
 `max_waves`) and the env's own `max_decisions` / `max_episode_seconds` are `truncated` (`info["end"]` has the cause).
 
 **Seeds.** In a vector env of n, `reset(seed=S)` makes env k play sim seeds S+k, S+k+n, …, so evaluation over
@@ -391,6 +391,40 @@ speed-up for RL.
 seeds 9000-9019 (waves cleared): BC argmax mean 4.5 (8 of 20 runs stuck in a reward-screen loop until the sim
 per-wave decision cap), BC sampled 6.0, random 8.0 on this run (9.15 on an earlier run with the same seeds; ~9.2
 over 200 seeds). One run is far too little data; this only shows the pipeline works end to end.
+
+### Self-play PPO (`rl/ppo.py`)
+
+```powershell
+Train.bat                                              # = .venv\Scripts\python -m rl.ppo (new run, 6 envs, runs until stopped)
+Train.bat --resume runs\models\ppo-<ts>\latest.pt       # continue (model, optimizer, counters)
+Stop-Train.bat                                         # ask every running trainer to stop (saves latest.pt, closes its servers)
+.venv\Scripts\python -m rl.ppo --init-bc runs\models\bc-<ts>.pt --bc-coef 0.05   # start from BC, keep a BC aux loss on runs/human
+.venv\Scripts\python -m rl.evaluate --model runs\models\ppo-<ts>\best.pt --sample --episodes 50   # checkpoints load like BC models
+```
+
+- **Model:** `MaskedPolicy` (2×256 MLP + LayerNorm, dropout 0) with its policy head over the 213 slots and its value
+  head; orthogonal init with a 0.01-gain policy head, so the untrained policy is ~uniform over legal actions (= random).
+- **Algorithm:** clipped PPO with invalid-action masking (log-probs and entropy over legal slots only), GAE,
+  per-minibatch advantage normalisation, clipped value loss, grad-norm clip, early stop on approx-KL. Gymnasium's
+  next-step autoreset makes the step after an episode end a dummy (its action is ignored); those are dropped from the
+  loss and GAE. A wipe does not bootstrap; a run cut by a limit bootstraps with its last state's value.
+- **Defaults:** 6 envs × 256 steps = 1536 decisions per update, 4 epochs, minibatch 512, Adam lr 2.5e-4, γ 0.997,
+  λ 0.95, clip 0.2, entropy 0.01, value 0.5, max grad norm 0.5, target KL 0.03.
+- **Reward (defaults here):** +1 per wave cleared, −0.001 per decision, −2 when a run is cut by a limit (sim turn /
+  decision / stall limits, the env's time cap, or `--max-wave-decisions 300`: more than 300 decisions in one wave,
+  i.e. a menu loop). All are flags (`--step-cost`, `--limit-penalty`, `--boss-bonus`, `--wipe-penalty`, `--hp-delta`).
+  `RewardConfig.limit_penalty` and the env's `max_wave_decisions` are new and default to off for other callers.
+- **Seeds:** training plays seeds 110000+ (a new block of 10000 after every eval reset); evaluation uses the fixed
+  held-out seeds 9000–9049, which training never sees.
+- **Eval:** at the start, random and the untrained policy on 9000–9049; then every `--eval-every 30` updates the
+  current policy, sampled (`--eval-modes sample,greedy` adds argmax). The best sampled mean is saved as `best.pt`.
+- **Outputs:** `runs/train/<ts>/` has `train.log` (one line per update), `metrics.csv` (losses, entropy, KL,
+  explained variance, decisions/s, training episodes' waves), `eval.csv`, `episodes.csv` (every training episode),
+  `config.json`, `pid.txt`; `finished` appears when it exits. Checkpoints: `runs/models/ppo-<ts>/ckpt-<update>.pt`
+  every 10 updates, `latest.pt` every update, `best.pt`.
+- **Stopping:** `Stop-Train.bat` writes `runs/train/<ts>/STOP`; the trainer stops after the current update. Hard stop
+  if it hangs: `taskkill /T /F /PID <pid from pid.txt>` (the `/T` also ends its env workers and sim servers).
+  A sim crash restarts the envs (up to `--max-restarts 20`) and carries on from the in-memory model.
 
 ## Browser parity (for a future pokerogue.net adapter)
 
