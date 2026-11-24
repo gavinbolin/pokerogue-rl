@@ -110,23 +110,41 @@ legal action is applied automatically and counted as `forced`. If the game ever 
 |---|---|---|
 | `command` | battle turn per active mon | `move:i` (usable moves only), `switch:slot`, `ball:type` (wild, one foe, not in End), `run` (wild, not trapped), `struggle` |
 | `target` | move needs a target in doubles | `target:BattlerIndex` |
-| `reward` | post-wave reward screen | `reward:i`, `shop:i` (affordable), `reroll` (affordable), `skip` |
+| `reward` | post-wave reward screen | `reward:i`, `shop:i` (affordable), `reroll` (affordable), `skip`, `transfer` (the "Manage Items" button, when some held item can move to another member) |
 | `party` (`sub` = PartyUiMode) | faint switch, item/TM/evo target, move PP target, … | `slot:s`, `slot:s/move:m`, `cancel` |
-| `learn_move` | level-up / TM with 4 moves known | `forget:i`, `keep` |
+| `party` / `MODIFIER_TRANSFER` | after `transfer`, one pick per decision; `context.stage` = `from` → `item` → `qty` (stacks only) → `to` | `xfer_from:s` / `cancel` (Done, back to the rewards); `xfer_item:i`, `xfer_item:all`; `xfer_qty:n`; `xfer_to:t`; `back` undoes the last pick |
+| `learn_move` | level-up / TM with 4 moves known: "Should a move be forgotten?" | `forget:i` (Yes + that move), `keep` (No / back out of the move list) |
+| `learn_move` / `stop_teaching` | after `keep`: "Stop trying to teach X?" | `stop` (Yes: not learned), `retry` (No: back to the question above) |
 | `catch_full` | caught a mon with a full party | `release:slot`, `keep_party` |
 | `biome` / `option` | biome choice, other yes/no prompts | `opt:i` (informational options like "check summary" are hidden) |
 
 Typical legal-action counts (200 random runs): command 7.6 on average (2–12), reward 4.3, target 2.8,
 faint switch 3.2, catch_full 7, learn_move 5, move-target party 11.7 (up to 23).
 
-Not exposed yet: Tera, the shop's lock-rarity and item-transfer actions, and the run-history and summary
-screens. See "Browser parity" below.
+Transfers follow `PartyUiHandler` in `MODIFIER_TRANSFER` mode: items are indexed as the game's transfer
+callback indexes them, quantity defaults to the full stack (`xfer_qty:n` lists max…1, as `<`/`>` cycle in
+the game), "All" moves every item at full stacks, only mons that can take the item ("Able") are offered, and
+after a transfer you stay on the transfer screen until Done, as in the game. Transfers are free and don't
+use up the reward.
+
+Not exposed yet: Tera, lock rarity, item discard, Check Team's form-change items, and the run-history and
+summary screens. See "Browser parity" below.
+
+**Live-UI features and old logs.** Actions added after the first runs were logged are grouped as features
+(`ALL_FEATURES` in `sim/env.ts`): `learn_confirm` (the stop-teaching confirm as its own decision) and
+`item_transfer`. New runs use all of them and list them in the `start` record (`features`). A run whose
+`start` has no `features` is replayed without them, so its old decision sequence is reproduced exactly; when
+such a run is resumed, the server switches it to all features at that point and writes them into the `resume`
+record, and later replays switch at the same step. (Before this, the "Stop trying to teach X?" confirm was
+shown as a second `learn_move` decision whose `keep` answered No and asked again, so you could not decline a
+move. The sim's settings helper never reached the game's settings object, so all runs so far used the game
+defaults, which is also what the live game uses.)
 
 ## Log format (`runs/<out>/endless_seed<N>_<policy>.jsonl`)
 
 One JSON object per line, with the record type in `t`:
 
-- `start`: seed, policy, gamePin, mode, team, maxWaves, turnLimit, battleStyle, withObs
+- `start`: seed, policy, gamePin, mode, team, maxWaves, turnLimit, battleStyle, withObs, features
 - `d`: step, wave, turn, kind, sub, phase, `n` (legal count), `chosen` index, action id and label.
   With obs (the default) it also has `actions` (the full legal list), `context`, `prompt`, and `obs`. That is
   one complete (state, legal mask, action) training sample, about 5 KB.
@@ -134,7 +152,8 @@ One JSON object per line, with the record type in `t`:
 - `wave`: a new wave was reached (wave, party HP fraction, alive count, ms spent)
 - `end`: cause (`wipe | max_waves | turn_limit:N | decision_limit:N | stalled:… | error:…`), wave,
   wavesCleared, decisions, forced, autoSteps, animSkips, rejected, bootSeconds, playSeconds
-- `resume`: (server) a paused run was replayed and continued in a new session
+- `resume`: (server) a paused run was replayed and continued in a new session; `features` = the feature set
+  from here on, `upgraded` = an older run was switched to it here
 
 `summary.jsonl` in the same folder has one line per run with decisions/sec and waves/sec.
 
@@ -176,9 +195,15 @@ page makes no outside requests):
   party slots with icons, HP bars, held items and fainted styling, plus the highlighted mon's types, ability, moves
   and stats. Slots that aren't a legal choice are greyed out. If a slot has several choices (e.g. which move gets the
   Ether), a sub-menu lists them.
-- **Reward screen:** item cards with icons and tier colours, the shop row with prices, Reroll / Skip, and each item's
-  description in the message box.
-- **Learn move, biome choice and other prompts** use the game's option window.
+- **Reward screen:** item cards with icons and tier colours, the shop row with prices, Reroll / Skip / Manage Items,
+  and each item's description in the message box.
+- **Manage Items (transfer):** the party screen in transfer mode, like the game: pick the mon holding the item,
+  then the item (or All) in a window over the party, then how many if it is a stack, then the mon to give it to
+  (mons that can't take it are greyed). `X` goes back one step; **Done** returns to the rewards.
+- **Learn move:** "Should a move be forgotten and replaced with X?" Yes / No. Yes opens the move list (with the new
+  move's type, power and accuracy); `X` or "Don't learn" there, or No, leads to "Stop trying to teach X?" Yes / No,
+  where No asks again, as in the game.
+- **Biome choice and other prompts** use the game's option window.
 - **Keys:** arrows move, `Z`/`Enter`/`Space` confirm, `X`/`Esc`/right-click go back, and `1`–`9` pick the nth option in the
   current menu. `Tab` lists *all* legal actions (a fallback that always reaches every action), `N` starts a new run
   and `R` opens Runs. The mouse works everywhere.
@@ -204,7 +229,8 @@ Runs, resume and review work as before:
   paused and resumable.
 
 `node scripts/ui-shots.mjs` (with the server running) renders screenshots of the battle, fight menu, party,
-reward, battle text and, when they come up, catch-with-full-party, item target, doubles and game-over screens
+reward, battle text and, when they come up, catch-with-full-party, item target, doubles and game-over screens,
+then plays throwaway runs until it can show the learn-move flow (`8-*`) and Manage Items / transfer (`9-*`),
 into `runs/ui-shots/`. It uses a throwaway headless Edge with its own temp profile and debug port 9339 (never 9222).
 
 ## Server API (for scripts and the future Python Gym env)
@@ -261,11 +287,12 @@ log format and the play UI (not implemented yet):
 |---|---|---|
 | Tera | Command menu Tera toggle once you hold a Tera Orb; the move then terastallizes the mon | ~0.5–1 day (`tera+move:i` actions, obs fields, UI button) |
 | Lock rarity | Reward screen toggle with a Lock Capsule; rerolls keep tiers | ~0.5 day |
-| Item transfer (and discard) | Reward screen "Transfer": pick source mon, held item, quantity, target mon (or discard) | ~1–1.5 days (multi-step sub-decisions) |
+| Item discard | Manage Items screen toggles to Discard: pick mon, item / All, quantity, confirm | ~0.5 day (same stages as transfer) |
+| Check Team form changes | Reward screen "Check Team" party mode: use form-change items (Mega / G-Max toggles), unpause evolution, unsplice | ~0.5–1 day |
 | Check team / summary / Pokédex | Informational screens from battle and reward | ~0.5 day UI only; no game effect, so no actions |
 | Starter select | Real starter screen with the account's unlocks: ability, nature, form, gender, shiny/variant, passive, egg moves, candy cost reductions | ~1–2 days to model starter config; the live account decides what is legal |
 | Settings parity | Battle style, EXP display, skip-seen-dialogue etc. affect which prompts appear | ~0.5 day (match a fixed settings profile) |
 | Browser adapter itself | Read on-screen state and press keys with animation timing | separate project, ~3–5 days |
 
 Everything already exposed (moves, switches, balls, run, targets, rewards, shop, reroll, skip, party targets,
-learn/forget, release, biome / yes-no options) maps 1:1 to a live UI action.
+learn/forget and stop-teaching, held-item transfer, release, biome / yes-no options) maps to live UI input.
