@@ -159,6 +159,70 @@ try {
     await shot("7-game-over");
   }
   await api("abandon");
+
+  // 5. live-UI features: declining a new move ("Stop trying to teach?") and Manage Items (transfer).
+  // Plays throwaway runs (random-ish, moves preferred) until both have come up.
+  const todo = new Set(["learn", "transfer"]);
+  const find = id => r.decision.actions.findIndex(a => a.id === id || a.id.startsWith(id));
+  const refresh = async () => {
+    await sleep(600);
+    r = await api("state");
+  };
+  for (let run = 0; run < 25 && todo.size; run++) {
+    r = await api("reset", { seed: `${v.seed}-f${run}`, policy: "human", out: "runs/ui-shots/log" });
+    for (let n = 0; n < 2500 && r.decision && todo.size; n++) {
+      const d = r.decision;
+      if (todo.has("learn") && d.kind === "learn_move" && !d.sub && find("keep") >= 0) {
+        todo.delete("learn");
+        await load();
+        await shot("8-learn-move-confirm"); // "Should a move be forgotten?" Yes / No
+        await key("z"); // Yes
+        await shot("8-learn-move-forget-list"); // move list + Don't learn
+        await key("x"); // back out = don't learn
+        await refresh();
+        if (r.decision?.sub === "stop_teaching") {
+          await load();
+          await shot("8-learn-stop-teaching"); // "Stop trying to teach X?"
+        }
+        continue;
+      }
+      if (todo.has("transfer") && d.kind === "reward" && find("transfer") >= 0) {
+        todo.delete("transfer");
+        await load();
+        for (let k = 0; k < 3; k++) {
+          await key("ArrowDown"); // to the bottom-right window
+        }
+        await shot("9-reward-manage-items");
+        r = await api("step", { index: find("transfer") });
+        await load();
+        await shot("9-transfer-from");
+        for (const [stage, pre] of [["from", "xfer_from:"], ["item", "xfer_item:"], ["qty", "xfer_qty:"]]) {
+          if (r.decision?.context?.stage === stage && find(pre) >= 0) {
+            r = await api("step", { index: find(pre) });
+            if (r.decision?.context?.stage !== "from") {
+              await load();
+              await shot(`9-transfer-${r.decision.context.stage}`);
+            }
+          }
+        }
+        if (r.decision?.context?.stage === "to" && find("xfer_to:") >= 0) {
+          r = await api("step", { index: find("xfer_to:") });
+          await load();
+          await shot("9-transfer-done"); // back on the transfer screen, item moved
+        }
+        continue;
+      }
+      const moves = d.actions.map((a, i) => (a.id.startsWith("move:") ? i : -1)).filter(i => i >= 0);
+      const i = d.kind === "command" && moves.length && n % 4 ? moves[n % moves.length] : d.kind === "learn_move" && !d.sub ? find("keep") : (n * 7919) % d.actions.length;
+      r = await api("step", { index: Math.max(0, i) });
+    }
+    if (r.decision) {
+      await api("abandon");
+    }
+  }
+  if (todo.size) {
+    console.log(`(not reached: ${[...todo].join(", ")})`);
+  }
 } finally {
   try {
     ws?.close();
