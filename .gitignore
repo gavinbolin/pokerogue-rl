@@ -9,3 +9,36 @@ runs/
 .venv/
 __pycache__/
 *.pyc
+
+# Secrets / private data (added before going public)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*secret*
+*token*.json
+*credential*
+*cookie*
+*password*
+# Browser profiles / session state
+User Data/
+chrome-profile*/
+.browser*/
+.grok-run/
+# Large outputs, checkpoints, dumps
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+checkpoints/
+models/
+*.zip
+*.7z
+*.mp4
+*.wav
+*.mp3
+*.sqlite
+*.db
