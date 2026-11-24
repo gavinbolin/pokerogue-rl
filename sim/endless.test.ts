@@ -81,7 +81,7 @@ it("plays endless", async () => {
     };
     const env = new EndlessEnv(phaserGame, realRand, opts);
     const policy = makePolicy(policyName, seed);
-    log.write({ t: "start", seed, policy: policyName, gamePin: pin, mode: "ENDLESS", team: env.team, maxWaves, turnLimit: opts.turnLimit, battleStyle: opts.battleStyle, withObs });
+    log.write({ t: "start", seed, policy: policyName, gamePin: pin, mode: "ENDLESS", team: env.team, maxWaves, turnLimit: opts.turnLimit, battleStyle: opts.battleStyle, withObs, features: env.features });
     say(`seed=${seed} team=${env.team.speciesIds.join(",")} (${env.team.points}/${env.team.cap} pts)`);
 
     mute();

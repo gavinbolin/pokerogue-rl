@@ -37,7 +37,7 @@ import net from "node:net";
 import path from "node:path";
 import Phaser from "phaser";
 import { afterAll, beforeAll, it } from "vitest";
-import { type Decision, type EndInfo, EndlessEnv, isDecision } from "./env.ts";
+import { ALL_FEATURES, type Decision, type EndInfo, EndlessEnv, isDecision } from "./env.ts";
 import { decisionRecord, RunLog } from "./log.ts";
 import { drawTeam } from "./team.ts";
 import { visualize } from "./visual.ts";
@@ -158,6 +158,8 @@ interface RunOptions {
   turnLimit: number;
   /** attach presentation data (sprites, icons, effectiveness) to responses; default on for human play */
   visual: boolean;
+  /** live-UI features (see ALL_FEATURES); undefined = all. Resumed pre-feature runs pass []. */
+  features?: string[];
 }
 
 class Run {
@@ -179,6 +181,7 @@ class Run {
       team: o.team,
       pointCap: POINT_CAP,
       withObs: o.withObs,
+      features: o.features,
       turnLimit: o.turnLimit,
       battleStyle: o.battleStyle,
       stallMs: 30000,
@@ -270,7 +273,7 @@ function runFile(req: Record<string, any>): string {
 async function handle(req: Record<string, any>): Promise<Record<string, unknown>> {
   switch (req.cmd) {
     case "ping":
-      return { session: SESSION, gamePin: PIN, runId: run?.runId ?? null, active: !!run && !!run.current && isDecision(run.current) };
+      return { session: SESSION, gamePin: PIN, features: ALL_FEATURES, runId: run?.runId ?? null, active: !!run && !!run.current && isDecision(run.current) };
 
     case "starters":
       return { cap: POINT_CAP, starters: starters() };
@@ -321,6 +324,7 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
           turnLimit: opts.turnLimit,
           battleStyle: opts.battleStyle,
           withObs: opts.withObs,
+          features: run.env.features,
           time: new Date().toISOString(),
         });
       }
@@ -424,14 +428,25 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
         battleStyle: start.battleStyle === "switch" ? "switch" : "set",
         turnLimit: start.turnLimit ?? 300,
         visual: req.visual ?? true,
+        // Runs logged before live-UI features existed have no `features`: replay them without any.
+        features: Array.isArray(start.features) ? start.features.map(String) : [],
       };
       const r = new Run(opts, start.runId, path.dirname(file));
       run = r;
       const replay = recs.filter(x => x.t === "d");
       const t0 = Date.now();
+      let upgraded = false;
       r.current = await muted(async () => {
         let cur = await r.env.reset();
-        for (const rec of replay) {
+        for (const rec of recs) {
+          // An earlier resume switched this run to a newer feature set from that step on.
+          if (rec.t === "resume" && Array.isArray(rec.features) && isDecision(cur)) {
+            cur = await r.env.setFeatures(rec.features.map(String));
+            continue;
+          }
+          if (rec.t !== "d") {
+            continue;
+          }
           if (!isDecision(cur)) {
             fail(`replay ended early at step ${rec.step}`);
           }
@@ -441,11 +456,16 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
           }
           cur = await r.env.step(rec.chosen);
         }
+        // Play on with every live-UI feature, whatever the run started with.
+        if (isDecision(cur) && ALL_FEATURES.some(f => !r.env.features.includes(f))) {
+          cur = await r.env.setFeatures(ALL_FEATURES);
+          upgraded = true;
+        }
         return cur;
       });
       r.env.drainMessages();
       r.log = new RunLog(path.dirname(file), start.runId, { append: true, autoFlush: true });
-      r.log.write({ t: "resume", session: SESSION, replayed: replay.length, time: new Date().toISOString() });
+      r.log.write({ t: "resume", session: SESSION, replayed: replay.length, features: r.env.features, upgraded, time: new Date().toISOString() });
       if (!isDecision(r.current)) {
         r.finish(r.current);
       }

@@ -14,8 +14,10 @@
  *   target   - target choice for a single-target move in a double battle
  *   reward   - post-wave reward screen: take reward i, buy shop item k, reroll, skip
  *   party    - pick a party member (faint switch, item / TM / berry target, move for PP items,
+ *              held-item transfer from the reward screen (sub MODIFIER_TRANSFER, context.stage),
  *              memory mushroom move, splice pair, release on full party, revival blessing)
- *   learn_move - mon with 4 moves wants a new one: forget move i, or don't learn
+ *   learn_move - mon with 4 moves wants a new one: forget move i, or don't learn; then (sub
+ *              "stop_teaching", live default) "Stop trying to teach X?": stop, or go back and pick again
  *   biome    - choose next biome (only when a Map lets you)
  *   catch_full - caught a mon with 6 in party: release slot s to keep it, or don't keep it
  *   option   - any other in-game option / confirm menu
@@ -25,7 +27,6 @@
  */
 import type { BattleScene } from "#app/battle-scene";
 import { getGameMode } from "#app/game-mode";
-import { settings } from "#app/global-settings-manager";
 import { speciesDataRegistry } from "#app/global-species-data-registry";
 import { BattleScene as BattleSceneClass } from "#app/battle-scene";
 import * as BattleAnims from "#data/battle-anims";
@@ -42,13 +43,14 @@ import { PokeballType } from "#enums/pokeball";
 import type { SpeciesId } from "#enums/species-id";
 import { UiMode } from "#enums/ui-mode";
 import { PlayerPokemon } from "#field/pokemon";
-import { HealShopCostModifier } from "#modifiers/modifier";
+import { HealShopCostModifier, PokemonHeldItemModifier } from "#modifiers/modifier";
 import {
   FusePokemonModifierType,
   getPlayerShopModifierTypeOptionsForWave,
   PokemonModifierType,
   PokemonMoveModifierType,
 } from "#modifiers/modifier-type";
+import { LearnMovePhase } from "#phases/learn-move-phase";
 import { SelectStarterPhase } from "#phases/select-starter-phase";
 import { GameManager } from "#test/framework/game-manager";
 import { PromptHandler } from "#test/helpers/prompt-handler";
@@ -101,7 +103,20 @@ export interface EndInfo {
 
 export const isDecision = (x: Decision | EndInfo): x is Decision => !(x as EndInfo).done;
 
+/**
+ * Live-UI features added after the first runs were logged. A run's start record lists the ones it
+ * was played with (`features`); a record without the field is an older run, replayed with none so
+ * its decision sequence is reproduced exactly.
+ *   learn_confirm - the live "Stop trying to teach X?" confirm after declining a move (game setting
+ *                   levelMoveConfirmation, on by default in the live game)
+ *   item_transfer - the reward screen's Transfer button (move held items between party members)
+ */
+export const ALL_FEATURES = ["learn_confirm", "item_transfer"] as const;
+export type Feature = (typeof ALL_FEATURES)[number];
+
 export interface EnvOptions {
+  /** live-UI features to enable (default: all of ALL_FEATURES); pass [] to replay a pre-feature run */
+  features?: readonly string[];
   seed: string;
   maxWaves: number | null;
   team: number[] | null; // fixed species list (debug); null = seeded random team under the cap
@@ -146,6 +161,9 @@ export class EndlessEnv {
   private pending: Pending | null = null;
   private pendingSkip = false;
   private pendingForget: number | null = null;
+  /** Held-item transfer in progress (party screen in MODIFIER_TRANSFER mode): what's picked so far. */
+  private xfer: { from?: number; item?: number | "all"; qty?: number } = {};
+  private features_: Feature[];
   private pendingRelease: number | null = null;
   private step_ = 0;
   private forced = 0;
@@ -166,6 +184,33 @@ export class EndlessEnv {
     readonly opts: EnvOptions,
   ) {
     this.team = opts.team?.length ? fixedTeam(opts.team, opts.pointCap) : drawTeam(opts.seed, opts.pointCap);
+    this.features_ = ALL_FEATURES.filter(f => (opts.features ?? ALL_FEATURES).includes(f));
+  }
+
+  get features(): readonly Feature[] {
+    return this.features_;
+  }
+
+  has(f: Feature): boolean {
+    return this.features_.includes(f);
+  }
+
+  /**
+   * Switch live-UI features mid-run (e.g. an older run resumed in a newer session) and re-read the
+   * pending decision under the new set. Game state is untouched; the step number stays the same.
+   */
+  async setFeatures(list: readonly string[]): Promise<Decision | EndInfo> {
+    this.features_ = ALL_FEATURES.filter(f => list.includes(f));
+    if (this.finished) {
+      return this.finished;
+    }
+    if (!this.pending) {
+      throw new Error("setFeatures() called with no pending decision");
+    }
+    this.pending = null;
+    this.step_--;
+    this.waveDecisions--;
+    return this.advance();
   }
 
   // ---------------------------------------------------------------- boot
@@ -190,9 +235,11 @@ export class EndlessEnv {
     }
     this.reseed(seed);
     stubHeadlessAssets();
-    setSetting("hideIvScanner", true);
-    setSetting("levelMoveConfirmation", false); // drop the "stop trying to teach?" re-confirm loop
-    setSetting("enableMoveAnimations", false);
+    // Earlier versions "set" hideIvScanner / levelMoveConfirmation / enableMoveAnimations here through a
+    // helper that never reached settings.general, so every run logged so far used the game's defaults.
+    // Keep the defaults (replays stay exact). levelMoveConfirmation=true is also the live default, i.e. the
+    // "Stop trying to teach X?" confirm always appeared; feature learn_confirm just exposes it correctly.
+    trackStopTeaching();
 
     this.game = new GameManager(this.phaserGame, true);
     // GameManager forces max rolls on battle RNG and sows Phaser with "test"; undo both.
@@ -493,6 +540,9 @@ export class EndlessEnv {
       if (this.pendingRelease != null && h.partyUiMode === PartyUiMode.RELEASE) {
         return null; // handled by autoAdvance
       }
+      if (h.partyUiMode === PartyUiMode.MODIFIER_TRANSFER && this.has("item_transfer")) {
+        return this.transferDecision(phase, h);
+      }
       return this.partyDecision(phase, h);
     }
     if (mode === UiMode.SUMMARY && name === "LearnMovePhase" && typeof h.moveSelectFunction === "function" && this.pendingForget == null) {
@@ -682,6 +732,127 @@ export class EndlessEnv {
       h.processInput(Button.CANCEL);
       return true;
     });
+    // Appended last so older runs' action indices are unchanged.
+    if (this.has("item_transfer") && this.transferSources().length) {
+      this.add(p, { id: "transfer", label: "Manage Items", data: { desc: "Manage Pokémon held items (Transfer)." } }, () => {
+        this.xfer = {};
+        return press(0, 1)();
+      });
+    }
+    return p;
+  }
+
+  // ---------------------------------------------------------------- held-item transfer
+
+  /** Transferable held items of party member s, in the order the transfer screen / phase callback index them. */
+  private heldTransferable(s: number): PokemonHeldItemModifier[] {
+    const q = this.scene.getPlayerParty()[s];
+    if (!q) {
+      return [];
+    }
+    return this.scene.findModifiers(m => m instanceof PokemonHeldItemModifier && m.isTransferable && m.pokemonId === q.id) as PokemonHeldItemModifier[];
+  }
+
+  /** Can target slot t take at least one of `item` (the transfer screen's "Able" / "Not able")? */
+  private canTake(item: PokemonHeldItemModifier, t: number): boolean {
+    const q = this.scene.getPlayerParty()[t];
+    if (!q || q.id === item.pokemonId) {
+      return false;
+    }
+    const match = this.scene.findModifier(m => m instanceof PokemonHeldItemModifier && m.pokemonId === q.id && m.matchType(item)) as PokemonHeldItemModifier | undefined;
+    return !match || match.getCountUnderMax() > 0;
+  }
+
+  private targetsFor(from: number, item: number | "all"): number[] {
+    const items = this.heldTransferable(from);
+    const list = item === "all" ? items : [items[item]].filter(Boolean);
+    return this.scene
+      .getPlayerParty()
+      .map((_, t) => t)
+      .filter(t => t !== from && list.some(it => this.canTake(it, t)));
+  }
+
+  /** Party slots holding at least one item that some other member can take. */
+  private transferSources(): number[] {
+    const party = this.scene.getPlayerParty();
+    if (party.length < 2) {
+      return [];
+    }
+    return party.map((_, s) => s).filter(s => this.heldTransferable(s).some((_, i) => this.targetsFor(s, i).length > 0));
+  }
+
+  /**
+   * The live transfer screen, one pick per decision: source mon -> item (or All) -> quantity (stacks)
+   * -> target mon. "back" undoes the last pick (the B button); "cancel" (Done) returns to the rewards.
+   * A finished transfer stays on the transfer screen, as in the game, so several can be made.
+   */
+  private transferDecision(phase: any, h: AnyHandler): Pending {
+    const party = this.scene.getPlayerParty();
+    if (this.xfer.from != null && !this.transferSources().includes(this.xfer.from)) {
+      this.xfer = {};
+    }
+    const x = this.xfer;
+    const stage = x.from == null ? "from" : x.item == null ? "item" : x.item !== "all" && x.qty == null && (this.heldTransferable(x.from)[x.item]?.getStackCount() ?? 1) > 1 ? "qty" : "to";
+    const items = x.from == null ? [] : this.heldTransferable(x.from);
+    const itemInfo = (it: PokemonHeldItemModifier) => ({ name: safeName(it), count: it.getStackCount(), typeId: (it.type as any)?.id });
+    const p = this.base(phase, "party", {
+      sub: "MODIFIER_TRANSFER",
+      prompt: stage === "from" ? "Choose a Pokémon. (Transfer)" : stage === "item" ? "Select a held item to transfer." : stage === "qty" ? "How many to transfer?" : "Transfer to which Pokémon?",
+      context: { stage, from: x.from, item: x.item, qty: x.qty, items: items.map(itemInfo) },
+    });
+    const back = (to: typeof x) => this.add(p, { id: "back", label: "Back" }, () => ((this.xfer = to), true));
+    if (stage === "from") {
+      for (const s of this.transferSources()) {
+        this.add(p, { id: `xfer_from:${s}`, label: party[s].name, data: { slot: s, species: party[s].species.speciesId, items: this.heldTransferable(s).map(itemInfo) } }, () => ((this.xfer = { from: s }), true));
+      }
+      this.add(p, { id: "cancel", label: "Done" }, () => {
+        this.xfer = {};
+        return callOnce(h, "selectCallback", 6, PartyOption.CANCEL);
+      });
+      return p;
+    }
+    const from = x.from!;
+    if (stage === "item") {
+      items.forEach((it, i) => {
+        if (this.targetsFor(from, i).length) {
+          this.add(p, { id: `xfer_item:${i}`, label: `${safeName(it)} x${it.getStackCount()}`, data: itemInfo(it) }, () => ((this.xfer = { from, item: i }), true));
+        }
+      });
+      if (items.length > 1) {
+        this.add(p, { id: "xfer_item:all", label: "All" }, () => ((this.xfer = { from, item: "all" }), true));
+      }
+      back({});
+      return p;
+    }
+    if (stage === "qty") {
+      const max = items[x.item as number].getStackCount();
+      for (let n = max; n >= 1; n--) {
+        this.add(p, { id: `xfer_qty:${n}`, label: `x${n}`, data: { qty: n } }, () => ((this.xfer = { ...x, qty: n }), true));
+      }
+      back({ from });
+      return p;
+    }
+    // stage "to"
+    for (const t of this.targetsFor(from, x.item!)) {
+      this.add(p, { id: `xfer_to:${t}`, label: `Give to ${party[t].name}`, data: { slot: t, species: party[t].species.speciesId } }, () => {
+        const cb = h.selectCallback;
+        if (typeof cb !== "function") {
+          return false;
+        }
+        if (x.item === "all") {
+          // PartyUiHandler.processTransferOption: every item, full stacks, last index first.
+          const maxes = items.map(it => it.getStackCount());
+          for (let i = items.length - 1; i >= 0; i--) {
+            cb(from, i, maxes[i], t);
+          }
+        } else {
+          cb(from, x.item, x.qty ?? items[x.item as number].getStackCount(), t);
+        }
+        this.xfer = {};
+        return true;
+      });
+    }
+    back(x.item !== "all" && x.qty != null && items[x.item as number]?.getStackCount() > 1 ? { from, item: x.item } : { from });
     return p;
   }
 
@@ -804,6 +975,19 @@ export class EndlessEnv {
   private learnDecision(phase: any, h: AnyHandler): Pending {
     const mon = phase.getPokemon() as PlayerPokemon;
     const move = allMoves[phase.moveId];
+    // Without learn_confirm (runs logged before it) this confirm was shown as another learn_move decision
+    // whose "keep" answered No and re-asked; kept as-is so those runs replay exactly.
+    if (phase[STOP_TEACHING] && this.has("learn_confirm")) {
+      // LearnMovePhase.rejectMoveAndEnd: "Stop trying to teach X?" Yes = give up, No = back to the replace question.
+      const p = this.base(phase, "learn_move", {
+        sub: "stop_teaching",
+        prompt: `Stop trying to teach ${move?.name}?`,
+        context: { slot: phase.partyMemberIndex, moveId: phase.moveId, move: move?.name, type: move?.type, power: move?.power, accuracy: move?.accuracy, category: move?.category },
+      });
+      this.add(p, { id: "stop", label: `Yes: ${mon.name} doesn't learn ${move?.name}` }, () => pickOption(h, 0));
+      this.add(p, { id: "retry", label: "No: choose a move to forget" }, () => pickOption(h, 1));
+      return p;
+    }
     const p = this.base(phase, "learn_move", {
       prompt: `${mon.name} wants to learn ${move?.name}`,
       context: { slot: phase.partyMemberIndex, moveId: phase.moveId, move: move?.name, type: move?.type, power: move?.power, accuracy: move?.accuracy, category: move?.category },
@@ -952,14 +1136,6 @@ function lastText(scene: BattleScene): string | undefined {
   }
 }
 
-function setSetting(key: string, value: unknown): void {
-  for (const group of Object.values(settings as unknown as Record<string, Record<string, unknown>>)) {
-    if (group && typeof group === "object" && key in group) {
-      group[key] = value;
-    }
-  }
-}
-
 /** Animation JSON and sprite atlases are not checked out: resolve their loaders immediately. */
 function stubHeadlessAssets(): void {
   BattleSceneClass.prototype.preload = async () => {};
@@ -1014,6 +1190,35 @@ function patchUi(scene: BattleScene, sink: string[]): void {
       }
       return addCounter(data);
     };
+  }
+}
+
+/** Marks a LearnMovePhase while its "Stop trying to teach?" confirm (not the replace question) is up. */
+const STOP_TEACHING = Symbol("stopTeaching");
+let stopTeachingTracked = false;
+function trackStopTeaching(): void {
+  if (stopTeachingTracked) {
+    return;
+  }
+  stopTeachingTracked = true;
+  const proto = LearnMovePhase.prototype as any;
+  for (const [fn, flag] of [["replaceMoveCheck", false], ["rejectMoveAndEnd", true]] as const) {
+    const orig = proto[fn];
+    if (typeof orig !== "function") {
+      throw new Error(`LearnMovePhase.${fn} not found (game code changed?)`);
+    }
+    proto[fn] = function (this: any, ...args: unknown[]) {
+      this[STOP_TEACHING] = flag;
+      return orig.apply(this, args);
+    };
+  }
+}
+
+function safeName(m: { type: { name: string } }): string {
+  try {
+    return m.type.name;
+  } catch {
+    return "item";
   }
 }
 

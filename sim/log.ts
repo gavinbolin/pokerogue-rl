@@ -1,12 +1,13 @@
 /**
  * One jsonl file per run. Record types (field "t"):
- *   start  - seed, team, options, game pin
+ *   start  - seed, team, options, game pin, features (live-UI features on; absent = none, older run)
  *   d      - a decision: step, wave, turn, kind, sub, phase, n (legal count), chosen index,
  *            chosen action id/label, rejected (game refused it), and (unless --no-obs)
  *            the observation + full legal action list, enough to train a policy on.
  *   wave   - wave transition: wave, partyHpFrac, alive, ms spent on the previous wave
  *   rej    - the game refused the previous decision's action
- *   resume - a run was resumed (replayed to this step) in a later session
+ *   resume - a run was resumed (replayed to this step) in a later session; `features` = the set used from
+ *            here on (replays switch to it at this point)
  *   end    - cause, wave, wavesCleared, counts, timings
  */
 import fs from "node:fs";
