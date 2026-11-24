@@ -361,6 +361,19 @@ async function handle(req: Record<string, any>): Promise<Record<string, unknown>
       return r!.view({ simMs: Date.now() - t0, rejected: r!.env.lastDecisionRejected });
     }
 
+    case "debug_give": {
+      // Screenshot / test helper: only for runs that are not being logged, so no log ever contains it.
+      const r = run;
+      if (!r?.current || !isDecision(r.current)) {
+        fail("no decision pending");
+      }
+      if (r!.log) {
+        fail("debug_give is only allowed on unlogged runs (reset with log: false)");
+      }
+      r!.current = await muted(() => r!.env.debugGive(Array.isArray(req.items) ? req.items : []));
+      return r!.view();
+    }
+
     case "state":
       return run ? run.view() : { decision: null };
 
